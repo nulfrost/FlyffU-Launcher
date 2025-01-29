@@ -1,0 +1,15 @@
+{
+  "name": "flyffu",
+  "version": "1.0.0",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-packager . FlyffU --overwrite --platform=win32,darwin,linux --icon=./icon.png --out=build"
+  },
+  "author": "Toffee <toffeeplaysgg@gmail.com>",
+  "license": "ISC",
+  "devDependencies": {
+    "electron": "^25.9.8",
+    "electron-packager": "^17.1.0"
+  }
+}
