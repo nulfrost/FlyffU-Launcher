@@ -4,21 +4,20 @@ A custom **multi-profile launcher** for [Flyff Universe](https://universe.flyff.
 Made by **Toffee** ✨
 
 ## Features 🚀
-- Manage multiple profiles with isolated sessions (cookies, storage, logins).
-- Create, rename, clone, and delete profiles easily.
-- Quick profile switching with **drag & drop reordering**.
-- Hotkey: **Ctrl + Shift + L** to hide/show the launcher while playing.
-- Optional **window frame toggle** per profile.
-- Full cleanup of session data or saved logins when needed.
+- Manage multiple profiles with isolated sessions.
+- Create, rename, clone, and delete profiles.
+- Drag & drop to reorder profiles.
+- Hotkey: **Ctrl + Shift + L** to show/hide the launcher while playing.
+- Toggle window frame per profile.
+- Clear session data or saved logins anytime.
+
+## Quick Start ⚡
+Download the latest **zip file release**, extract it, and run:  
+**`FlyffU Launcher.exe`**
 
 ## Installation ⚡
 ```bash
-# Clone this repo
-git clone https://github.com/yourname/flyffu-launcher.git
-cd flyffu-launcher
-
-# Install dependencies
+git clone https://github.com/toffeegg/FlyffU-Launcher.git
+cd FlyffU-Launcher
 npm install
-
-# Run in dev mode
 npm start
