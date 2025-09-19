@@ -4,6 +4,7 @@ A custom **multi-profile launcher** for [Flyff Universe](https://universe.flyff.
 Made by **Toffee** ✨
 
 ## Features
+- Smoother gameplay experience than usual browsers.
 - Multi-profile support with isolated sessions.  
 - Create, rename, clone, reorder, and delete profiles.  
 - Assign and filter profiles by **job class** (Vagrant, Knight, Slayer, etc.).  
