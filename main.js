@@ -15,12 +15,40 @@ const PROFILES_FILE = path.join(USER_DATA, 'profiles.json');
 const PENDING_FILE = path.join(USER_DATA, 'pending_deletes.json');
 const TRASH_DIR = path.join(USER_DATA, 'Trash');
 
+// Jobs
+const JOBS = [
+  'Vagrant',
+  'Acrobat',
+  'Jester',
+  'Ranger',
+  'Harlequin',
+  'Crackshooter',
+  'Assist',
+  'Ringmaster',
+  'Billposter',
+  'Seraph',
+  'Force Master',
+  'Magician',
+  'Psykeeper',
+  'Elementor',
+  'Mentalist',
+  'Arcanist',
+  'Mercenary',
+  'Blade',
+  'Knight',
+  'Slayer',
+  'Templar'
+];
+const JOBS_SET = new Set(JOBS);
+const DEFAULT_JOB = 'Vagrant';
+const JOB_OPTIONS_HTML = JOBS.map(j => `<option value="${j}">${j}</option>`).join('');
+
 // Single-instance lock
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
   app.quit();
 } else {
-    app.on('second-instance', () => {
+  app.on('second-instance', () => {
     ensureLauncher();
     if (launcherWin && !launcherWin.isDestroyed()) {
       if (launcherWin.isMinimized()) launcherWin.restore();
@@ -30,14 +58,9 @@ if (!gotTheLock) {
   });
 }
 
-// Server options (Live only)
-const SERVERS = {
-  live: { label: 'Live Server', url: 'https://universe.flyff.com/play', dev: false }
-};
-
 // ---------- Profiles storage helpers ----------
 
-/** @typedef {{name:string, server:keyof SERVERS, savedAuth?:Record<string,{u:string,p:string}>, partition:string, frame?:boolean, isClone?:boolean}} Profile */
+/** @typedef {{name:string, job:string, savedAuth?:Record<string,{u:string,p:string}>, partition:string, frame?:boolean, isClone?:boolean}} Profile */
 
 function readRawProfiles() {
   try {
@@ -116,16 +139,17 @@ function normalizeProfiles(arr) {
     .map(item => {
       if (typeof item === 'string') {
         const name = safeProfileName(item);
-        return { name, server: 'live', savedAuth: {}, partition: partitionForProfile({ name }), frame: false, isClone: inferIsCloneFromName(name) };
+        return { name, job: DEFAULT_JOB, savedAuth: {}, partition: partitionForProfile({ name }), frame: false, isClone: inferIsCloneFromName(name) };
       }
       const name = safeProfileName(item?.name);
       if (!name) return null;
-      const server = (item?.server && SERVERS[item.server]) ? item.server : 'live';
+      const jobRaw = (item?.job || '').trim();
+      const job = JOBS_SET.has(jobRaw) ? jobRaw : DEFAULT_JOB;
       const savedAuth = (item?.savedAuth && typeof item.savedAuth === 'object') ? item.savedAuth : {};
       const partition = (typeof item?.partition === 'string' && item.partition) ? item.partition : partitionForProfile({ name });
       const frame = !!item?.frame;
       const isClone = (typeof item?.isClone === 'boolean') ? item.isClone : inferIsCloneFromName(name);
-      return { name, server, savedAuth, partition, frame, isClone };
+      return { name, job, savedAuth, partition, frame, isClone };
     })
     .filter(Boolean);
 }
@@ -399,6 +423,8 @@ function createLauncher() {
     }
   });
 
+  const jobFilterOptions = `<option value="all">All Jobs</option>${JOB_OPTIONS_HTML}`;
+
   const html = `
   <!doctype html>
   <html>
@@ -548,6 +574,7 @@ function createLauncher() {
           <div class="card-h" style="margin-top:10px">
             <button id="createBtn" class="btn primary" style="max-height:34px">Create Profile</button>
             <input id="searchInput" type="text" placeholder="Search profile name..." style="max-width:240px">
+            <select id="jobFilter" style="max-width:180px;height:34px;padding:0 8px;">${jobFilterOptions}</select>
             <span class="muted" id="count">0</span>
           </div>
 
@@ -555,7 +582,7 @@ function createLauncher() {
             <div class="sec-title">Profile Name</div>
             <div class="grid cols-2">
               <input id="createName" type="text" placeholder="Profile name (e.g. Main, Alt, Archer SEA)">
-              <div></div>
+              <select id="createJob">${JOB_OPTIONS_HTML}</select>
             </div>
             <div class="grid cols-2" style="margin-top:8px">
               <button id="createAdd" class="btn primary">Add</button>
@@ -579,6 +606,7 @@ function createLauncher() {
       let manageOpen = null;
       let actives = [];
       let filterText = '';
+      let jobFilter = 'all';
       let draggingName = null;
 
       const toastsEl = document.getElementById('toasts');
@@ -598,10 +626,12 @@ function createLauncher() {
       const createBtn = document.getElementById('createBtn');
       const createForm = document.getElementById('createForm');
       const createName = document.getElementById('createName');
+      const createJob = document.getElementById('createJob');
       const createAdd = document.getElementById('createAdd');
       const createCancel = document.getElementById('createCancel');
 
       const searchInput = document.getElementById('searchInput');
+      const jobFilterEl = document.getElementById('jobFilter');
 
       createBtn.onclick = () => { 
         createForm.classList.toggle('show'); 
@@ -617,13 +647,19 @@ function createLauncher() {
         render();
       });
 
+      jobFilterEl.addEventListener('change', () => {
+        jobFilter = (jobFilterEl.value || 'all').trim();
+        render();
+      });
+
       function isActive(name){ return actives.includes(name); }
       function anySessionOpen(){ return (actives && actives.length > 0); }
 
       async function addProfile() {
         const val = (createName.value || '').trim();
+        const job = (createJob.value || '').trim();
         if (!val) return alert('Enter a profile name');
-        const res = await ipcRenderer.invoke('profiles:add', { name: val });
+        const res = await ipcRenderer.invoke('profiles:add', { name: val, job });
         if (!res.ok) return alert(res.error || 'Failed to add profile');
         createName.value = '';
         createForm.classList.remove('show');
@@ -639,13 +675,13 @@ function createLauncher() {
       const dropAbove = document.getElementById('dropAbove');
       const dropBelow = document.getElementById('dropBelow');
 
-      function tagFor(){ return 'Live Server'; }
-
       function applyFilters(list){
         const ft = filterText;
+        const jf = jobFilter;
         return list.filter(p => {
           const byText = !ft || (p.name || '').toLowerCase().includes(ft);
-          return byText;
+          const byJob = (jf === 'all') || ((p.job || '').trim() === jf);
+          return byText && byJob;
         });
       }
 
@@ -730,7 +766,9 @@ function createLauncher() {
 
           const nm = document.createElement('div');
           nm.className = 'name';
-          nm.innerHTML = name + ' <span class="tag">' + tagFor() + '</span>';
+          const job = (p.job || '').trim();
+          const jobTag = job ? ' <span class="tag">'+job+'</span>' : '';
+          nm.innerHTML = name + jobTag;
 
           leftWrap.appendChild(dragHandle);
           leftWrap.appendChild(nm);
@@ -790,8 +828,11 @@ function createLauncher() {
           renameInput.placeholder = 'Rename profile';
           renameInput.value = name;
           renameWrap.appendChild(renameInput);
-          const spacer = document.createElement('div');
-          renameWrap.appendChild(spacer);
+
+          const jobSel = document.createElement('select');
+          jobSel.innerHTML = \`${JOB_OPTIONS_HTML}\`;
+          jobSel.value = p.job || '${DEFAULT_JOB}';
+          renameWrap.appendChild(jobSel);
 
           const saveRow = document.createElement('div');
           saveRow.className = 'grid cols-2';
@@ -800,8 +841,9 @@ function createLauncher() {
           saveBtn.textContent = 'Save Changes';
           saveBtn.onclick = async () => {
             const newName = (renameInput.value || '').trim();
+            const newJob = (jobSel.value || '').trim();
             if (!newName) return alert('Enter a valid name');
-            const res = await ipcRenderer.invoke('profiles:update', { from: name, to: newName });
+            const res = await ipcRenderer.invoke('profiles:update', { from: name, to: newName, job: newJob });
             if (!res.ok) return alert(res.error || 'Failed to update');
             manageOpen = newName;
             await refresh();
@@ -812,7 +854,7 @@ function createLauncher() {
           frameBtn.className = 'btn';
           frameBtn.textContent = p.frame ? 'Disable Window Frame' : 'Enable Window Frame';
           frameBtn.onclick = async () => {
-            const res = await ipcRenderer.invoke('profiles:update', { from: name, to: name, frame: !p.frame });
+            const res = await ipcRenderer.invoke('profiles:update', { from: name, to: name, frame: !p.frame, job: jobSel.value });
             if (!res.ok) return alert(res.error || 'Failed to update');
             await refresh();
             showToast('Window frame ' + (!p.frame ? 'enabled' : 'disabled') + '.');
@@ -1016,9 +1058,7 @@ function launchGameWithProfile(name) {
   const profile = getProfileByName(name);
   if (!profile) return;
   const part = partitionForProfile(profile);
-  const server = SERVERS[profile.server] ? profile.server : 'live';
-  const url = SERVERS[server].url;
-  const isDev = !!SERVERS[server].dev;
+  const url = 'https://universe.flyff.com/play';
 
   const win = new BrowserWindow({
     width: 1200,
@@ -1026,7 +1066,7 @@ function launchGameWithProfile(name) {
     autoHideMenuBar: true,
     show: false,
     frame: !!profile.frame,
-    icon: isDev ? 'dev.png' : 'icon.png',
+    icon: 'icon.png',
     webPreferences: {
       backgroundThrottling: false,
       partition: part,
@@ -1187,12 +1227,15 @@ ipcMain.handle('profiles:active', async () => {
 ipcMain.handle('profiles:add', async (_e, payload) => {
   const list = readProfiles();
   const nameInput = typeof payload === 'string' ? payload : payload?.name;
+  const jobInput = typeof payload === 'object' ? (payload?.job || '') : '';
 
   const name = safeProfileName(nameInput);
   if (!name) return { ok: false, error: 'Enter a valid name' };
   if (list.some(p => p.name === name)) return { ok: false, error: 'Name already exists' };
 
-  const profile = { name, server: 'live', savedAuth: {}, partition: partitionForProfile({ name }), frame: true, isClone: false };
+  const job = JOBS_SET.has((jobInput || '').trim()) ? (jobInput || '').trim() : DEFAULT_JOB;
+
+  const profile = { name, job, savedAuth: {}, partition: partitionForProfile({ name }), frame: true, isClone: false };
   writeProfiles([...list, profile]);
   if (launcherWin) launcherWin.webContents.send('profiles:updated');
   return { ok: true };
@@ -1216,7 +1259,7 @@ ipcMain.handle('profiles:clone', async (_e, { name }) => {
 
   const cloned = {
     name: targetName,
-    server: 'live',
+    job: src.job || DEFAULT_JOB,
     savedAuth: { ...(src.savedAuth || {}) },
     partition: newPartition,
     frame: !!src.frame,
@@ -1253,7 +1296,7 @@ ipcMain.handle('profiles:reorder', async (_e, orderNames) => {
   return { ok: true };
 });
 
-ipcMain.handle('profiles:update', async (_e, { from, to, server, frame }) => {
+ipcMain.handle('profiles:update', async (_e, { from, to, frame, job }) => {
   const list = readProfiles();
   const idx = getProfileIndex(list, from);
   if (idx === -1) return { ok: false, error: 'Profile not found' };
@@ -1261,9 +1304,6 @@ ipcMain.handle('profiles:update', async (_e, { from, to, server, frame }) => {
   const newName = safeProfileName(to || from);
   if (!newName) return { ok: false, error: 'Enter a valid name' };
   if (newName !== from && list.some(p => p.name === newName)) return { ok: false, error: 'Target name already exists' };
-
-  const newServer = SERVERS[server] ? server : (list[idx].server || 'live');
-  const newFrame = (typeof frame === 'boolean') ? frame : !!list[idx].frame;
 
   if (newName !== from && gameWindows.has(from)) {
     const wins = gameWindows.get(from);
@@ -1279,11 +1319,13 @@ ipcMain.handle('profiles:update', async (_e, { from, to, server, frame }) => {
   const oldPartition = list[idx].partition || partitionForProfile(list[idx]);
   const wasClone = typeof list[idx].isClone === 'boolean' ? list[idx].isClone : inferIsCloneFromName(list[idx].name);
 
+  const nextJob = JOBS_SET.has((job || '').trim()) ? (job || '').trim() : (list[idx].job || DEFAULT_JOB);
+
   list[idx].name = newName;
-  list[idx].server = newServer; // will always be 'live' in UI
   list[idx].partition = oldPartition;
-  list[idx].frame = newFrame;
+  list[idx].frame = (typeof frame === 'boolean') ? frame : !!list[idx].frame;
   list[idx].isClone = wasClone;
+  list[idx].job = nextJob;
 
   writeProfiles(list);
 
