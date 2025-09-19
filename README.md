@@ -3,19 +3,20 @@
 A custom **multi-profile launcher** for [Flyff Universe](https://universe.flyff.com/play), built with **Electron**.  
 Made by **Toffee** ✨
 
-## Features 🚀
-- Manage multiple profiles with isolated sessions.
-- Create, rename, clone, and delete profiles.
-- Drag & drop to reorder profiles.
-- Hotkey: **Ctrl + Shift + L** to show/hide the launcher while playing.
-- Toggle window frame per profile.
-- Clear session data or saved logins anytime.
+## Features
+- Multi-profile support with isolated sessions.  
+- Create, rename, clone, reorder, and delete profiles.  
+- Assign and filter profiles by **job class** (Vagrant, Knight, Slayer, etc.).  
+- Global hotkey **Ctrl + Shift + L** to show/hide the launcher while playing.  
+- Toggle window frame per profile.  
+- Clear session data or saved logins at any time.  
+- Secure deletion fully removes profile partitions.  
 
-## Quick Start ⚡
-Download the latest **release zip package**, extract its contents, and launch:  
+## Quick Start
+Download the latest **release zip package**, extract its contents, and run:  
 **`FlyffU Launcher.exe`**
 
-## Installation ⚡
+## Installation (Dev)
 ```bash
 git clone https://github.com/toffeegg/FlyffU-Launcher.git
 cd FlyffU-Launcher
