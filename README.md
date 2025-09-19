@@ -7,10 +7,9 @@ Made by **Toffee** ✨
 
 ## Features
 - Smoother gameplay experience than usual browsers.
-- Multi-profile support with isolated sessions.  
+- Multi-profile support.  
 - Create, rename, clone, reorder, and delete profiles.  
 - Assign and filter profiles by **job class** (Vagrant, Knight, Slayer, etc.).  
-- Global hotkey **Ctrl + Shift + L** to show/hide the launcher while playing.  
 - Toggle window frame per profile.  
 - Clear session data or saved logins at any time.  
 - Secure deletion fully removes profile partitions.  
