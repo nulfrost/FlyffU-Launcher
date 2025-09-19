@@ -3,6 +3,8 @@
 A custom **multi-profile launcher** for [Flyff Universe](https://universe.flyff.com/play), built with **Electron**.  
 Made by **Toffee** ✨
 
+<img src="[https://github.com/toffeegg/FlyffU-Launcher/blob/main/icon.png](https://github.com/toffeegg/FlyffU-Launcher/blob/main/images/Screenshot%202025-09-20%20043728.png)" width="120" height="60" />
+
 ## Features
 - Smoother gameplay experience than usual browsers.
 - Multi-profile support with isolated sessions.  
