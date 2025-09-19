@@ -1,4 +1,4 @@
-# FlyffU Launcher ![icon](https://github.com/toffeegg/FlyffU-Launcher/blob/main/icon.png)
+# FlyffU Launcher <img src="https://github.com/toffeegg/FlyffU-Launcher/blob/main/icon.png" width="16" height="16" />
 
 A custom **multi-profile launcher** for [Flyff Universe](https://universe.flyff.com/play), built with **Electron**.  
 Made by **Toffee** ✨
