@@ -1,15 +1,24 @@
 {
-  "name": "flyffu",
-  "version": "1.0.0",
+  "name": "FlyffU Launcher",
+  "version": "1.0.5",
   "main": "main.js",
-  "scripts": {
-    "start": "electron .",
-    "build": "electron-packager . FlyffU --overwrite --platform=win32,darwin,linux --icon=./icon.png --out=build"
-  },
   "author": "Toffee <toffeeplaysgg@gmail.com>",
   "license": "ISC",
+  "scripts": {
+    "start": "electron .",
+    "build:win": "electron-packager . FlyffU --overwrite --platform=win32 --arch=x64 --icon=./build-res/icon.ico --out=build",
+    "build:mac": "electron-packager . FlyffU --overwrite --platform=darwin --arch=arm64,x64 --icon=./build-res/icon.icns --out=build",
+    "build:linux": "electron-packager . FlyffU --overwrite --platform=linux --arch=x64,arm64 --icon=./build-res/icon.png --out=build",
+    "build:all": "npm run build:win && npm run build:mac && npm run build:linux"
+  },
   "devDependencies": {
-    "electron": "^25.9.8",
-    "electron-packager": "^17.1.0"
+    "electron": "^38.1.0",
+    "electron-packager": "^17.1.2"
+  },
+  "overrides": {
+    "minimist": "^1.2.8",
+    "optimist": {
+      "minimist": "^1.2.8"
+    }
   }
 }
