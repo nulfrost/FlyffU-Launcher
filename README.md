@@ -12,7 +12,7 @@ Made by **Toffee** ✨
 - Clear session data or saved logins anytime.
 
 ## Quick Start ⚡
-Download the latest **zip file release**, extract it, and run:  
+Download the latest **release zip package**, extract its contents, and launch:  
 **`FlyffU Launcher.exe`**
 
 ## Installation ⚡
