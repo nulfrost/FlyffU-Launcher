@@ -12,7 +12,7 @@ Made by **Toffee** ✨
 - Search and filter profiles by **job class** (Vagrant, Knight, Slayer, etc.).  
 - Profiles can be dragged and reordered with live save.  
 - Toggle window frame per profile.  
-- **Window size & position autosave** per profile.  
+- Window size & position autosave per profile.  
 - Clear session data or saved logins at any time.  
 - Secure deletion fully removes profile partitions.  
 - Global hotkey **Ctrl + Shift + L** to toggle the launcher visibility while playing.  
