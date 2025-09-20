@@ -1,6 +1,6 @@
 # FlyffU Launcher <img src="https://github.com/toffeegg/FlyffU-Launcher/blob/main/icon.png" width="32" height="32" />
 
-A custom **multi-profile launcher** for [Flyff Universe](https://universe.flyff.com/play), built with **Electron**.  
+A **multi-profile launcher** for [Flyff Universe](https://universe.flyff.com/play). 
 
 <img src="https://github.com/toffeegg/FlyffU-Launcher/blob/main/images/Screenshot%202025-09-20%20043728.png" width="520" height="440" />
 
