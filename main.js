@@ -60,7 +60,7 @@ if (!gotTheLock) {
 
 // ---------- Profiles storage helpers ----------
 
-/** @typedef {{name:string, job:string, savedAuth?:Record<string,{u:string,p:string}>, partition:string, frame?:boolean, isClone?:boolean}} Profile */
+/** @typedef {{name:string, job:string, partition:string, frame?:boolean, isClone?:boolean, winState?:{bounds?:{x?:number,y?:number,width:number,height:number}, isMaximized?:boolean}}} Profile */
 
 function readRawProfiles() {
   try {
@@ -132,6 +132,27 @@ function inferIsCloneFromName(name) {
   return /\bCopy(?:\s+\d+)?$/i.test(String(name || '').trim());
 }
 
+function sanitizeWinState(ws) {
+  try {
+    if (!ws || typeof ws !== 'object') return undefined;
+    const isMaximized = !!ws.isMaximized;
+    let bounds;
+    if (ws.bounds && typeof ws.bounds === 'object') {
+      const b = {
+        x: (typeof ws.bounds.x === 'number') ? ws.bounds.x : undefined,
+        y: (typeof ws.bounds.y === 'number') ? ws.bounds.y : undefined,
+        width: Math.max(200, Number(ws.bounds.width) || 0),
+        height: Math.max(200, Number(ws.bounds.height) || 0)
+      };
+      if (b.width && b.height) bounds = b;
+    }
+    if (!bounds && !isMaximized) return undefined;
+    return { bounds, isMaximized };
+  } catch {
+    return undefined;
+  }
+}
+
 function normalizeProfiles(arr) {
   if (!Array.isArray(arr)) return [];
   return arr
@@ -139,17 +160,24 @@ function normalizeProfiles(arr) {
     .map(item => {
       if (typeof item === 'string') {
         const name = safeProfileName(item);
-        return { name, job: DEFAULT_JOB, savedAuth: {}, partition: partitionForProfile({ name }), frame: false, isClone: inferIsCloneFromName(name) };
+        return {
+          name,
+          job: DEFAULT_JOB,
+          partition: partitionForProfile({ name }),
+          frame: false,
+          isClone: inferIsCloneFromName(name),
+          winState: undefined
+        };
       }
       const name = safeProfileName(item?.name);
       if (!name) return null;
       const jobRaw = (item?.job || '').trim();
       const job = JOBS_SET.has(jobRaw) ? jobRaw : DEFAULT_JOB;
-      const savedAuth = (item?.savedAuth && typeof item.savedAuth === 'object') ? item.savedAuth : {};
       const partition = (typeof item?.partition === 'string' && item.partition) ? item.partition : partitionForProfile({ name });
       const frame = !!item?.frame;
       const isClone = (typeof item?.isClone === 'boolean') ? item.isClone : inferIsCloneFromName(name);
-      return { name, job, savedAuth, partition, frame, isClone };
+      const winState = (item && typeof item.winState === 'object') ? sanitizeWinState(item.winState) : undefined;
+      return { name, job, partition, frame, isClone, winState };
     })
     .filter(Boolean);
 }
@@ -182,6 +210,15 @@ function saveProfile(updated) {
   const idx = getProfileIndex(list, updated.name);
   if (idx === -1) return false;
   list[idx] = updated;
+  writeProfiles(list);
+  return true;
+}
+
+function patchProfile(name, patch) {
+  const list = readProfiles();
+  const idx = getProfileIndex(list, name);
+  if (idx === -1) return false;
+  list[idx] = { ...list[idx], ...patch };
   writeProfiles(list);
   return true;
 }
@@ -472,7 +509,7 @@ function createLauncher() {
       margin-left: auto;
     }
     .card-c{
-      flex:1;display:flex;flex-direction:column;padding:1px 12px; 1px 12px;min-height:0;
+      flex:1;display:flex;flex-direction:column;padding:1px 12px;min-height:0;
     }
   
     .btn{
@@ -512,6 +549,8 @@ function createLauncher() {
   
     .grid{display:grid;gap:8px}
     .grid.cols-2{grid-template-columns:1fr 1fr}
+    /* Make buttons inside 2-col grids align consistently full-width */
+    .grid.cols-2 > .btn{width:100%}
   
     .empty{
       padding:18px;border:1px dashed #263146;border-radius:8px;
@@ -633,7 +672,14 @@ function createLauncher() {
       const searchInput = document.getElementById('searchInput');
       const jobFilterEl = document.getElementById('jobFilter');
 
+      // Close expanded profile when toggling Create Profile
       createBtn.onclick = () => { 
+        manageOpen = null;
+        // Collapse any currently shown manage panels without re-rendering
+        document.querySelectorAll('.manage.show').forEach(el => el.classList.remove('show'));
+        // Ensure any "Close" buttons revert to "Manage"
+        document.querySelectorAll('.manage-btn').forEach(btn => { btn.textContent = 'Manage'; });
+        render();
         createForm.classList.toggle('show'); 
         if (createForm.classList.contains('show')) createName.focus(); 
       };
@@ -642,13 +688,17 @@ function createLauncher() {
         createName.value = '';
       };
 
+      // Close expanded profile when typing in Search
       searchInput.addEventListener('input', () => {
         filterText = (searchInput.value || '').trim().toLowerCase();
+        if (manageOpen !== null) manageOpen = null;
         render();
       });
 
+      // Close expanded profile when changing Job filter
       jobFilterEl.addEventListener('change', () => {
         jobFilter = (jobFilterEl.value || 'all').trim();
+        if (manageOpen !== null) manageOpen = null;
         render();
       });
 
@@ -710,6 +760,11 @@ function createLauncher() {
             draggingName = name;
             row.classList.add('dragging');
             e.dataTransfer.setData('text/plain', name);
+            // Collapse any open manage panel without disrupting drag
+            manageOpen = null;
+            document.querySelectorAll('.manage.show').forEach(el => el.classList.remove('show'));
+            // Make sure any "Close" label goes back to "Manage"
+            document.querySelectorAll('.manage-btn').forEach(btn => { btn.textContent = 'Manage'; });
           });
           row.addEventListener('dragend', () => {
             draggingName = null;
@@ -777,7 +832,8 @@ function createLauncher() {
           actions.className = 'row-actions';
 
           const manage = document.createElement('button');
-          manage.className = 'btn';
+          manage.className = 'btn manage-btn';
+          manage.dataset.name = name;
           manage.textContent = (manageOpen === name) ? 'Close' : 'Manage';
           if (isActive(name)) {
             manage.disabled = true;
@@ -865,17 +921,10 @@ function createLauncher() {
           m.appendChild(renameWrap);
           m.appendChild(saveRow);
 
+          // Controls row
           const authRow = document.createElement('div');
           authRow.className = 'grid cols-2';
-          const clearAuthBtn = document.createElement('button');
-          clearAuthBtn.className = 'btn';
-          clearAuthBtn.textContent = 'Clear Saved Logins';
-          clearAuthBtn.onclick = async () => {
-            if (!confirm('Clear saved HTTP auth credentials for "'+name+'"?')) return;
-            const res = await ipcRenderer.invoke('profiles:clear-auth', name);
-            if (!res.ok) alert(res.error || 'Failed to clear saved logins');
-            else showToast('Saved logins cleared.');
-          };
+
           const clearBtn = document.createElement('button');
           clearBtn.className = 'btn';
           clearBtn.textContent = 'Clear Session Data';
@@ -885,14 +934,31 @@ function createLauncher() {
             if (!res.ok) alert(res.error || 'Failed to clear session');
             else showToast('Session data cleared.');
           };
-          authRow.appendChild(clearAuthBtn);
           authRow.appendChild(clearBtn);
+
+          const resetWinBtn = document.createElement('button');
+          resetWinBtn.className = 'btn';
+          resetWinBtn.textContent = 'Reset Saved Window Size/Position';
+          const hasWinState = !!(p.winState && (p.winState.isMaximized || (p.winState.bounds && p.winState.bounds.width && p.winState.bounds.height)));
+          resetWinBtn.disabled = !hasWinState;
+          resetWinBtn.title = hasWinState ? '' : 'No saved window size/position yet';
+          resetWinBtn.onclick = async () => {
+            const ok = confirm('Reset saved window size/position for "'+name+'"?');
+            if (!ok) return;
+            const res = await ipcRenderer.invoke('profiles:resetWinState', name);
+            if (!res.ok) alert(res.error || 'Failed to reset');
+            else {
+              await refresh();
+              showToast('Saved window size/position reset.');
+            }
+          };
+          authRow.appendChild(resetWinBtn);
+
           m.appendChild(authRow);
 
           const dangerWrap = document.createElement('div');
           dangerWrap.className = 'grid cols-2';
 
-          // --- Clone button logic: disable for cloned profiles via persisted flag ---
           if (p.isClone) {
             const clonedBadge = document.createElement('button');
             clonedBadge.className = 'btn';
@@ -915,14 +981,13 @@ function createLauncher() {
           const delBtn = document.createElement('button');
           delBtn.className = 'btn danger';
           delBtn.textContent = 'Delete Profile';
-          // Disable ALL delete buttons while any session is running
           delBtn.disabled = anySessionOpen();
           delBtn.title = anySessionOpen() ? 'Close all running sessions to delete profiles.' : '';
           delBtn.onclick = async () => {
-            if (anySessionOpen()) return; // safety guard on click
+            if (anySessionOpen()) return;
             const ok = confirm('Delete "'+name+'"? This will remove its saved cookies/storage and fully delete its partition folder(s). The launcher will restart to complete deletion.');
             if (!ok) return;
-            setUiBusy(true); // lock UI interactions + show loading cursor
+            setUiBusy(true);
             const res = await ipcRenderer.invoke('profiles:delete', { name, clear: true });
             if (!res.ok) {
               setUiBusy(false);
@@ -966,93 +1031,61 @@ function createLauncher() {
   launcherWin.on('closed', () => { launcherWin = null; });
 }
 
-// ---------- HTTP Auth Modal ----------
+// ---------- Launch Game (with window state restore/save) ----------
 
-function promptHTTPAuth(parent, host) {
-  return new Promise((resolve) => {
-    const modal = new BrowserWindow({
-      parent,
-      modal: true,
-      width: 400,
-      height: 380,
-      resizable: false,
-      autoHideMenuBar: true,
-      title: 'Authentication Required',
-      webPreferences: {
-        nodeIntegration: true,
-        contextIsolation: false
-      }
-    });
+function applyWinStateOptionsFromProfile(profile) {
+  // Default: maximize when no saved state exists
+  const ws = sanitizeWinState(profile.winState);
+  const opts = {};
+  let postCreate = (win) => { try { win.maximize(); } catch {} };
 
-    const html = `
-    <!doctype html>
-    <html>
-    <head>
-      <meta charset="utf-8">
-      <style>
-        body{margin:0;background:#0b0f16;color:#e6edf3;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial}
-        .wrap{padding:16px}
-        h1{font-size:16px;margin:0 0 10px}
-        p{color:#9aa7bd;margin:0 0 14px}
-        label:not(.chk){display:block;font-size:12px;color:#9aa7bd;margin-bottom:6px}
-        input[type="text"], input[type="password"]{
-          width:90%;padding:10px 12px;border-radius:10px;border:1px solid #233046;background:#0c1220;color:#e6edf3;margin-bottom:12px
-        }
-        label.chk{
-          display:inline-flex;align-items:center;gap:8px;color:#9aa7bd;font-size:12px;margin-top:2px;margin-bottom:0
-        }
-        input[type="checkbox"]{width:auto;height:auto;margin:0;padding:0;}
-        .row{display:flex;justify-content:flex-end;gap:10px;margin-top:6px}
-        button{border:0;padding:10px 14px;border-radius:10px;background:#1b2334;color:#e6edf3;cursor:pointer}
-        button.primary{background:#2563eb}
-      </style>
-    </head>
-    <body>
-      <div class="wrap">
-        <h1>Authentication Required</h1>
-        <p>Server <strong>${host}</strong> requires a username and password.</p>
-        <label>Username</label>
-        <input id="u" type="text" autofocus />
-        <label>Password</label>
-        <input id="p" type="password" />
-        <label class="chk"><input id="r" type="checkbox" /> Save Login</label>
-        <div class="row">
-          <button id="cancel">Cancel</button>
-          <button id="ok" class="primary">OK</button>
-        </div>
-      </div>
-      <script>
-        const { ipcRenderer } = require('electron');
-        document.getElementById('cancel').onclick = () => ipcRenderer.send('auth:cancel');
-        function submit() {
-          const u = document.getElementById('u').value || '';
-          const p = document.getElementById('p').value || '';
-          const r = document.getElementById('r').checked || false;
-          ipcRenderer.send('auth:submit', { u, p, remember: r });
-        }
-        document.getElementById('ok').onclick = submit;
-        document.getElementById('p').addEventListener('keydown', (e)=>{ if(e.key==='Enter') submit(); });
-      </script>
-    </body>
-    </html>`;
-    modal.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+  if (ws && ws.bounds) {
+    if (typeof ws.bounds.width === 'number') opts.width = ws.bounds.width;
+    if (typeof ws.bounds.height === 'number') opts.height = ws.bounds.height;
+    if (typeof ws.bounds.x === 'number') opts.x = ws.bounds.x;
+    if (typeof ws.bounds.y === 'number') opts.y = ws.bounds.y;
+  }
 
-    const cleanup = () => {
-      try { if (!modal.isDestroyed()) modal.close(); } catch {}
-      ipcMain.removeAllListeners('auth:submit');
-      ipcMain.removeAllListeners('auth:cancel');
-    };
+  if (ws) {
+    postCreate = ws.isMaximized
+      ? (win) => { try { win.maximize(); } catch {} }
+      : (_win) => {};
+  }
 
-    ipcMain.once('auth:submit', (_e, data) => { cleanup(); resolve({ ok: true, ...data }); });
-    ipcMain.once('auth:cancel', () => { cleanup(); resolve({ ok: false }); });
-
-    modal.on('closed', () => {
-      resolve({ ok: false });
-    });
-  });
+  return { opts, postCreate };
 }
 
-// ---------- Launch Game ----------
+function captureCurrentWinState(win) {
+  try {
+    const isMaximized = !!win.isMaximized();
+    const bounds = isMaximized ? win.getNormalBounds() : win.getBounds();
+    if (!bounds || !bounds.width || !bounds.height) return undefined;
+    return {
+      bounds: {
+        x: typeof bounds.x === 'number' ? bounds.x : undefined,
+        y: typeof bounds.y === 'number' ? bounds.y : undefined,
+        width: Math.max(200, bounds.width),
+        height: Math.max(200, bounds.height)
+      },
+      isMaximized
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function saveWindowStateForProfile(profileName, win) {
+  const ws = captureCurrentWinState(win);
+  if (!ws) return;
+  const list = readProfiles();
+  const idx = getProfileIndex(list, profileName);
+  if (idx === -1) return;
+  list[idx].winState = sanitizeWinState(ws);
+  writeProfiles(list);
+  if (launcherWin && !launcherWin.isDestroyed()) {
+    launcherWin.webContents.send('profiles:updated');
+  }
+}
 
 function launchGameWithProfile(name) {
   const profile = getProfileByName(name);
@@ -1060,9 +1093,13 @@ function launchGameWithProfile(name) {
   const part = partitionForProfile(profile);
   const url = 'https://universe.flyff.com/play';
 
+  const { opts: winStateOpts, postCreate } = applyWinStateOptionsFromProfile(profile);
+
   const win = new BrowserWindow({
-    width: 1200,
-    height: 800,
+    width: winStateOpts.width || 1200,
+    height: winStateOpts.height || 800,
+    x: winStateOpts.x,
+    y: winStateOpts.y,
     autoHideMenuBar: true,
     show: false,
     frame: !!profile.frame,
@@ -1077,7 +1114,11 @@ function launchGameWithProfile(name) {
   win.__profileName = name;
 
   win.on('close', async (e) => {
-    if (win.__confirmedClose) return;
+    if (win.__confirmedClose) {
+      // save window state before final close
+      saveWindowStateForProfile(name, win);
+      return;
+    }
     e.preventDefault();
     const res = await dialog.showMessageBox(win, {
       type: 'question',
@@ -1089,10 +1130,19 @@ function launchGameWithProfile(name) {
       detail: 'Profile: ' + (win.__profileName || name)
     });
     if (res.response === 0) {
+      // user confirmed
+      saveWindowStateForProfile(name, win);
       win.__confirmedClose = true;
       win.close();
     }
   });
+
+  // Also save on maximization changes / move / resize (lightweight)
+  const debouncedSave = debounce(() => saveWindowStateForProfile(name, win), 300);
+  win.on('resize', debouncedSave);
+  win.on('move', debouncedSave);
+  win.on('maximize', debouncedSave);
+  win.on('unmaximize', debouncedSave);
 
   win.webContents.setWindowOpenHandler(({ url }) => {
     return {
@@ -1112,40 +1162,7 @@ function launchGameWithProfile(name) {
     };
   });
 
-  const onLogin = async (event, webContents, request, authInfo, callback) => {
-    if (webContents.id !== win.webContents.id) return;
-    event.preventDefault();
-
-    const hostKey = (authInfo.host || '').trim() || 'server';
-    const current = getProfileByName(win.__profileName || name);
-    const saved = current?.savedAuth?.[hostKey];
-
-    if (saved && saved.u && saved.p !== undefined) {
-      callback(saved.u, saved.p);
-      return;
-    }
-
-    const res = await promptHTTPAuth(win, hostKey);
-    if (res.ok && res.u !== undefined) {
-      if (res.remember) {
-        const updated = getProfileByName(win.__profileName || name);
-        if (updated) {
-          updated.savedAuth = updated.savedAuth || {};
-          updated.savedAuth[hostKey] = { u: res.u, p: res.p || '' };
-          saveProfile(updated);
-          if (launcherWin && !launcherWin.isDestroyed()) launcherWin.webContents.send('profiles:updated');
-        }
-      }
-      callback(res.u, res.p || '');
-    } else {
-      callback();
-    }
-  };
-  app.on('login', onLogin);
-
   win.on('closed', () => {
-    app.removeListener('login', onLogin);
-
     const key = win.__profileName || name;
     const s = gameWindows.get(key);
     if (s) {
@@ -1164,7 +1181,9 @@ function launchGameWithProfile(name) {
     }
   });
 
-  win.maximize();
+  // Apply post-create (maximize) if needed
+  try { postCreate(win); } catch {}
+
   win.loadURL(url);
   win.once('ready-to-show', () => win.show());
 
@@ -1172,6 +1191,14 @@ function launchGameWithProfile(name) {
   const set = gameWindows.get(name);
   set.add(win);
   broadcastActiveUpdate();
+}
+
+function debounce(fn, ms) {
+  let t;
+  return (...args) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...args), ms);
+  };
 }
 
 // ---------- Helpers: cookie cloning ----------
@@ -1235,7 +1262,7 @@ ipcMain.handle('profiles:add', async (_e, payload) => {
 
   const job = JOBS_SET.has((jobInput || '').trim()) ? (jobInput || '').trim() : DEFAULT_JOB;
 
-  const profile = { name, job, savedAuth: {}, partition: partitionForProfile({ name }), frame: true, isClone: false };
+  const profile = { name, job, partition: partitionForProfile({ name }), frame: true, isClone: false, winState: undefined };
   writeProfiles([...list, profile]);
   if (launcherWin) launcherWin.webContents.send('profiles:updated');
   return { ok: true };
@@ -1260,10 +1287,10 @@ ipcMain.handle('profiles:clone', async (_e, { name }) => {
   const cloned = {
     name: targetName,
     job: src.job || DEFAULT_JOB,
-    savedAuth: { ...(src.savedAuth || {}) },
     partition: newPartition,
     frame: !!src.frame,
-    isClone: true
+    isClone: true,
+    winState: src.winState ? { ...src.winState } : undefined
   };
 
   writeProfiles([...list, cloned]);
@@ -1318,7 +1345,6 @@ ipcMain.handle('profiles:update', async (_e, { from, to, frame, job }) => {
 
   const oldPartition = list[idx].partition || partitionForProfile(list[idx]);
   const wasClone = typeof list[idx].isClone === 'boolean' ? list[idx].isClone : inferIsCloneFromName(list[idx].name);
-
   const nextJob = JOBS_SET.has((job || '').trim()) ? (job || '').trim() : (list[idx].job || DEFAULT_JOB);
 
   list[idx].name = newName;
@@ -1326,6 +1352,7 @@ ipcMain.handle('profiles:update', async (_e, { from, to, frame, job }) => {
   list[idx].frame = (typeof frame === 'boolean') ? frame : !!list[idx].frame;
   list[idx].isClone = wasClone;
   list[idx].job = nextJob;
+  // Keep existing winState as-is
 
   writeProfiles(list);
 
@@ -1360,6 +1387,7 @@ ipcMain.handle('profiles:rename', async (_e, { from, to }) => {
   list[idx].name = newName;
   list[idx].partition = oldPartition;
   list[idx].isClone = wasClone;
+  // winState carried forward
 
   writeProfiles(list);
 
@@ -1368,12 +1396,13 @@ ipcMain.handle('profiles:rename', async (_e, { from, to }) => {
   return { ok: true };
 });
 
-ipcMain.handle('profiles:clear-auth', async (_e, name) => {
-  const p = getProfileByName(name);
-  if (!p) return { ok: false, error: 'Profile not found' };
-  p.savedAuth = {};
-  const ok = saveProfile(p);
-  if (!ok) return { ok: false, error: 'Failed to clear' };
+// Reset saved window size/position
+ipcMain.handle('profiles:resetWinState', async (_e, name) => {
+  const list = readProfiles();
+  const idx = getProfileIndex(list, name);
+  if (idx === -1) return { ok: false, error: 'Profile not found' };
+  list[idx].winState = undefined;
+  writeProfiles(list);
   if (launcherWin) launcherWin.webContents.send('profiles:updated');
   return { ok: true };
 });
