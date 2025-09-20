@@ -602,7 +602,11 @@ function createLauncher() {
           <div class="muted">Multi-profile launcher by Toffee</div>
         </div>
       </div>
-      <div class="muted" style="margin-left:auto;">Version ${pkg.version}</div>
+    <div class="muted" style="margin-left:auto;">
+      <a href="#" onclick="require('electron').shell.openExternal('https://github.com/toffeegg/FlyffU-Launcher/releases')" style="color:inherit;text-decoration:none;">
+        Version ${pkg.version}
+      </a>
+    </div>
     </div>
 
     <div class="wrap">
