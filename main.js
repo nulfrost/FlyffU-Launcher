@@ -2,13 +2,21 @@
 const { app, BrowserWindow, ipcMain, session, dialog, globalShortcut } = require('electron');
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
 const pkg = require('./package.json');
 
 let launcherWin = null;
+let quittingApp = false;
 
-// Track multiple game windows per profile
-// Map<string, Set<BrowserWindow>>
 const gameWindows = new Map();
+
+const LEGACY_DIRNAME = 'FlyffU Launcher';
+const appData = app.getPath('appData');
+const legacyUserData = path.join(appData, LEGACY_DIRNAME);
+
+try { fs.mkdirSync(legacyUserData, { recursive: true }); } catch {}
+app.setName('FlyffU Launcher');
+app.setPath('userData', legacyUserData);
 
 const USER_DATA = app.getPath('userData');
 const PROFILES_FILE = path.join(USER_DATA, 'profiles.json');
@@ -436,6 +444,55 @@ async function processPendingDeletes() {
   writePendingDeletes(remain);
 }
 
+// ---------- Update check helpers ----------
+
+function httpGetJson(url, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, {
+      headers: {
+        'User-Agent': 'FlyffU-Launcher',
+        'Accept': 'application/vnd.github+json',
+        ...headers
+      }
+    }, (res) => {
+      let data = '';
+      res.on('data', chunk => (data += chunk));
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(data);
+          resolve({ status: res.statusCode || 0, json });
+        } catch (e) {
+          reject(e);
+        }
+      });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+function normalizeVersion(v) {
+  return String(v || '').trim().replace(/^v/i, '');
+}
+
+function compareSemver(a, b) {
+  const pa = normalizeVersion(a).split('.').map(n => parseInt(n, 10) || 0);
+  const pb = normalizeVersion(b).split('.').map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] || 0, y = pb[i] || 0;
+    if (x > y) return 1;
+    if (x < y) return -1;
+  }
+  return 0;
+}
+
+async function fetchLatestReleaseTag() {
+  const { status, json } = await httpGetJson('https://api.github.com/repos/toffeegg/FlyffU-Launcher/releases/latest');
+  if (status !== 200) throw new Error('GitHub API error: ' + status);
+  // Prefer tag_name; fallback to name
+  return normalizeVersion(json.tag_name || json.name || '');
+}
+
 // ---------- UI ----------
 
 function createLauncher() {
@@ -445,7 +502,7 @@ function createLauncher() {
     resizable: false,
     autoHideMenuBar: true,
     show: false,
-    icon: 'icon.png',
+    icon: 'build-res/icon.png',
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
@@ -454,6 +511,7 @@ function createLauncher() {
   });
 
   launcherWin.on('close', (e) => {
+    if (quittingApp) return;
     if (getActiveProfileNames().length > 0) {
       e.preventDefault();
       launcherWin.hide();
@@ -512,23 +570,65 @@ function createLauncher() {
       flex:1;display:flex;flex-direction:column;padding:1px 12px;min-height:0;
     }
   
-    .btn{
-      border:0;padding:8px 10px;margin:1px 0;border-radius:8px;
-      background:#1b2334;color:var(--text);cursor:pointer;
-      transition:transform .05s,filter .15s;line-height:1.1;font-size:13px
+    .btn {
+      border: none;
+      padding: 8px 14px;
+      margin: 2px 0;
+      border-radius: 6px;
+      background: #1b2334;
+      color: #fff;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      letter-spacing: .3px;
+      transition: transform .1s ease, filter .2s ease, background .2s ease;
     }
-    .btn:hover{filter:brightness(1.06)}
-    .btn:active{transform:translateY(1px)}
-    .btn.primary{background:var(--accent)}
-    .btn.danger{background:var(--danger)}
-    .btn[disabled]{opacity:.55;cursor:not-allowed}
-  
-    input[type="text"], select{
-      width:100%;padding:8px 10px;margin:1px 0;border-radius:8px;
-      border:1px solid #233046;background:var(--panel-2);color:var(--text);
-      font-size:13px;line-height:1.2
+    
+    .btn:hover { filter: brightness(1.15); }
+    .btn:active { transform: scale(.97); }
+    
+    .btn.primary {
+      background: linear-gradient(135deg, #2c8ae8, #1f6fc2);
+      color: #fff;
+      box-shadow: 0 2px 6px rgba(44, 138, 232, 0.35);
     }
-  
+   .btn.primary:hover {
+      filter: brightness(1.15);
+      box-shadow: 0 3px 8px rgba(44, 138, 232, 0.45);
+    }
+    
+    .btn.primary:active {
+      transform: scale(.97);
+      box-shadow: 0 1px 4px rgba(44, 138, 232, 0.25);
+    }
+    
+    .btn.danger {
+      background: linear-gradient(135deg, #c62828, #a91d1d);
+      color: #fff;
+    }
+    
+    .btn[disabled] {
+      opacity: .5;
+      cursor: not-allowed;
+    }
+    
+    input[type="text"], select {
+      width: 100%;
+      padding: 8px 12px;
+      margin: 2px 0;
+      border-radius: 6px;
+      border: 1px solid #2a3548;
+      background: #151c28;
+      color: #e0e3ea;
+      font-size: 13px;
+      transition: border .2s ease, box-shadow .2s ease;
+    }
+    input[type="text"]:focus, select:focus {
+      border-color: #d4af37;
+      box-shadow: 0 0 0 2px rgba(212, 175, 55, .25);
+      outline: none;
+    }
+
     .list{
       flex:1 1 auto;min-height:0;
       display:flex;flex-direction:column;gap:8px;overflow:auto;margin-top:8px;
@@ -541,7 +641,20 @@ function createLauncher() {
       border-radius:8px;padding:10px
     }
     .row-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
-    .name{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:15px;margin-top:3px}
+	
+    .name {
+      font-weight: 600;
+      font-size: 15px;
+      color: #e6efff;
+      margin-top: 3px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      letter-spacing: 0.2px;
+      transition: color .2s ease;
+    }
+    .name:hover { color: #2c8ae8; }
+
     .row-actions{display:flex;gap:6px}
   
     .manage{margin-top:8px;border-top:1px dashed var(--line);padding-top:8px;display:none}
@@ -549,7 +662,6 @@ function createLauncher() {
   
     .grid{display:grid;gap:8px}
     .grid.cols-2{grid-template-columns:1fr 1fr}
-    /* Make buttons inside 2-col grids align consistently full-width */
     .grid.cols-2 > .btn{width:100%}
   
     .empty{
@@ -561,28 +673,56 @@ function createLauncher() {
     .create-form.show{display:block}
   
     .sec-title{font-size:11px;color:var(--sub);margin:6px 0 2px}
-    .tag{
-      display:inline-block;background:#162033;border:1px solid #233046;
-      border-radius:999px;padding:3px 6px;font-size:10.5px;color:#9aa7bd;margin-left:6px
+    .tag {
+      display: inline-block;
+      background: rgba(44, 138, 232, 0.08);
+      border: 1px solid rgba(44, 138, 232, 0.35);
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 11px;
+      font-weight: 500;
+      color: #9fb5d9;
+      margin-left: 6px;
+      line-height: 1.3;
     }
-  
     .toasts{
       position:fixed;right:12px;bottom:12px;display:flex;flex-direction:column;
       gap:8px;z-index:9999
     }
-    .toast{
-      background:#0f1522;border:1px solid #1f2633;border-left:3px solid var(--ok);
-      padding:10px 12px;border-radius:8px;min-width:200px;
-      box-shadow:0 8px 20px rgba(0,0,0,.3);opacity:0;transform:translateY(6px);
-      transition:opacity .2s ease, transform .2s ease
+    .toast {
+      background: #0f1624;
+      border: 1px solid #1e2a3e;
+      border-left: 3px solid #2c8ae8;
+      padding: 10px 14px;
+      border-radius: 8px;
+      min-width: 220px;
+      box-shadow: 0 8px 20px rgba(0,0,0,.35);
+      opacity: 0;
+      transform: translateY(6px);
+      transition: opacity .25s ease, transform .25s ease;
     }
-    .toast.show{opacity:1;transform:translateY(0)}
-    .toast .tmsg{font-size:12.5px;color:#cfe3ff}
+    
+    .toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+    
+    .toast .tmsg {
+      font-size: 13px;
+      font-weight: 500;
+      color: #d6e6ff;
+      letter-spacing: 0.2px;
+    }
   
     .drag-handle{cursor:grab;user-select:none;margin-right:6px;font-size:13px;color:#9aa7bd}
     .row.dragging{opacity:.6}
     .drop-indicator{height:6px;border-radius:6px;background:#233046;margin:6px 0;display:none}
     .drop-indicator.show{display:block}
+	
+    .update-wrap{ margin-left:auto; display:flex; align-items:center; gap:8px }
+    .update-badge{ font-size:10px; color:#9aa7bd }
+    .btn.sm{ padding:0px 3px 0px 3px; font-size:10px; border-radius:3px }
+    .btn.gold{ background: linear-gradient(135deg, #d4af37, #b88a1e); color:#000; font-weight:700 }	
   
     @media (max-width:860px){
       .grid.cols-2{grid-template-columns:1fr}
@@ -602,11 +742,14 @@ function createLauncher() {
           <div class="muted">Multi-profile launcher by Toffee</div>
         </div>
       </div>
-    <div class="muted" style="margin-left:auto;">
-      <a href="#" onclick="require('electron').shell.openExternal('https://github.com/toffeegg/FlyffU-Launcher/releases')" style="color:inherit;text-decoration:none;">
-        Version ${pkg.version}
-      </a>
-    </div>
+      <div class="update-wrap">
+        <div class="muted" id="versionLink">
+          <a href="#" onclick="require('electron').shell.openExternal('https://github.com/toffeegg/FlyffU-Launcher/releases')" style="color:inherit;text-decoration:none;">
+            Version ${pkg.version}
+          </a>
+        </div>
+        <button id="updateBtn" class="btn sm gold" style="display:none"></button>
+      </div>
     </div>
 
     <div class="wrap">
@@ -624,7 +767,7 @@ function createLauncher() {
           <div id="createForm" class="create-form">
             <div class="sec-title">Profile Name</div>
             <div class="grid cols-2">
-              <input id="createName" type="text" placeholder="Profile name (e.g. Main, Alt, Archer SEA)">
+              <input id="createName" type="text" placeholder="Profile name (e.g. Main, Alt, FWC)">
               <select id="createJob">${JOB_OPTIONS_HTML}</select>
             </div>
             <div class="grid cols-2" style="margin-top:8px">
@@ -644,7 +787,7 @@ function createLauncher() {
     <div class="toasts" id="toasts"></div>
 
     <script>
-      const { ipcRenderer } = require('electron');
+      const { ipcRenderer, shell } = require('electron');
       let profiles = [];
       let manageOpen = null;
       let actives = [];
@@ -666,6 +809,30 @@ function createLauncher() {
         }, 2600);
       }
 
+      async function nativeConfirm(message, detail = '', title = 'Confirm') {
+        try {
+          const res = await ipcRenderer.invoke('ui:confirm', { message, detail, title });
+          return !!(res && res.ok);
+        } catch {
+          // Fallback (should rarely happen)
+          return window.confirm(message);
+        }
+      }
+
+      // ----- Update check -----
+      const updateBtn = document.getElementById('updateBtn');
+      (async () => {
+        try{
+          const res = await ipcRenderer.invoke('app:check-update');
+          if (res && res.ok && res.updateAvailable) {
+            updateBtn.style.display = '';
+            updateBtn.textContent = 'Update Available — ' + res.latest;
+            updateBtn.onclick = () => shell.openExternal('https://github.com/toffeegg/FlyffU-Launcher/releases');
+            showToast('New version ' + res.latest + ' available.');
+          }
+        } catch {}
+      })();
+
       const createBtn = document.getElementById('createBtn');
       const createForm = document.getElementById('createForm');
       const createName = document.getElementById('createName');
@@ -676,33 +843,37 @@ function createLauncher() {
       const searchInput = document.getElementById('searchInput');
       const jobFilterEl = document.getElementById('jobFilter');
 
-      // Close expanded profile when toggling Create Profile
+      // Close expanded profile when toggling Create Profile; also reset job selector
       createBtn.onclick = () => { 
         manageOpen = null;
-        // Collapse any currently shown manage panels without re-rendering
         document.querySelectorAll('.manage.show').forEach(el => el.classList.remove('show'));
-        // Ensure any "Close" buttons revert to "Manage"
         document.querySelectorAll('.manage-btn').forEach(btn => { btn.textContent = 'Manage'; });
         render();
         createForm.classList.toggle('show'); 
-        if (createForm.classList.contains('show')) createName.focus(); 
+        if (createForm.classList.contains('show')) {
+          if (createJob && createJob.options && createJob.options.length) createJob.selectedIndex = 0;
+          createName.focus();
+        }
       };
       createCancel.onclick = () => {
         createForm.classList.remove('show');
         createName.value = '';
+        if (createJob && createJob.options && createJob.options.length) createJob.selectedIndex = 0;
       };
 
-      // Close expanded profile when typing in Search
+      // Close expanded profile AND collapse create form when typing in Search
       searchInput.addEventListener('input', () => {
         filterText = (searchInput.value || '').trim().toLowerCase();
         if (manageOpen !== null) manageOpen = null;
+        createForm.classList.remove('show');
         render();
       });
 
-      // Close expanded profile when changing Job filter
+      // Close expanded profile AND collapse create form when changing Job filter
       jobFilterEl.addEventListener('change', () => {
         jobFilter = (jobFilterEl.value || 'all').trim();
         if (manageOpen !== null) manageOpen = null;
+        createForm.classList.remove('show');
         render();
       });
 
@@ -712,16 +883,33 @@ function createLauncher() {
       async function addProfile() {
         const val = (createName.value || '').trim();
         const job = (createJob.value || '').trim();
-        if (!val) return alert('Enter a profile name');
+        if (!val) {
+          showToast('Please enter a profile name.');
+          createName.focus();
+          return;
+        }
         const res = await ipcRenderer.invoke('profiles:add', { name: val, job });
-        if (!res.ok) return alert(res.error || 'Failed to add profile');
+        if (!res.ok) {
+          showToast(res.error || 'Failed to add profile.');
+          createName.focus();
+          return;
+        }
+        // Reset inputs after successful create
         createName.value = '';
+        if (createJob && createJob.options && createJob.options.length) {
+          createJob.selectedIndex = 0; // reset job selector to first option
+        }
         createForm.classList.remove('show');
         await refresh();
-        showToast('Profile created.');
+        showToast('Profile created');
       }
       createAdd.onclick = addProfile;
-      createName.addEventListener('keydown', (e) => { if (e.key === 'Enter') addProfile(); });
+      createName.addEventListener('keydown', (e) => { 
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          addProfile();
+        }
+      });
 
       const listEl = document.getElementById('list');
       const countEl = document.getElementById('count');
@@ -806,7 +994,7 @@ function createLauncher() {
             const insertIdx = dropAbove.classList.contains('show') ? targetIdx : targetIdx + 1;
             order.splice(insertIdx, 0, from);
             const res = await ipcRenderer.invoke('profiles:reorder', order);
-            if (!res.ok) return alert(res.error || 'Failed to save order');
+            if (!res.ok) return alert(res.error || 'Failed to save order.');
             await refresh();
             showToast('Order saved.');
           });
@@ -843,6 +1031,8 @@ function createLauncher() {
             manage.disabled = true;
           } else {
             manage.onclick = () => {
+              // Collapse create form when clicking Manage
+              createForm.classList.remove('show');
               manageOpen = (manageOpen === name) ? null : name;
               render();
             };
@@ -867,7 +1057,9 @@ function createLauncher() {
           } else {
             play.textContent = 'Play';
             play.onclick = async () => {
+              // Collapse manage + create form when clicking Play
               manageOpen = null;
+              createForm.classList.remove('show');
               render();
               await ipcRenderer.invoke('profiles:launch', name);
             };
@@ -904,7 +1096,7 @@ function createLauncher() {
             const newJob = (jobSel.value || '').trim();
             if (!newName) return alert('Enter a valid name');
             const res = await ipcRenderer.invoke('profiles:update', { from: name, to: newName, job: newJob });
-            if (!res.ok) return alert(res.error || 'Failed to update');
+            if (!res.ok) return alert(res.error || 'Failed to update.');
             manageOpen = newName;
             await refresh();
             showToast('Changes saved.');
@@ -915,7 +1107,7 @@ function createLauncher() {
           frameBtn.textContent = p.frame ? 'Disable Window Frame' : 'Enable Window Frame';
           frameBtn.onclick = async () => {
             const res = await ipcRenderer.invoke('profiles:update', { from: name, to: name, frame: !p.frame, job: jobSel.value });
-            if (!res.ok) return alert(res.error || 'Failed to update');
+            if (!res.ok) return alert(res.error || 'Failed to update.');
             await refresh();
             showToast('Window frame ' + (!p.frame ? 'enabled' : 'disabled') + '.');
           };
@@ -931,12 +1123,13 @@ function createLauncher() {
 
           const clearBtn = document.createElement('button');
           clearBtn.className = 'btn';
-          clearBtn.textContent = 'Clear Session Data';
+          clearBtn.textContent = 'Clear Profile Data';
           clearBtn.onclick = async () => {
-            if (!confirm('Clear saved session (cookies, storage) for "'+name+'"?')) return;
+            const ok = await nativeConfirm('Clear profile data (cookies, cached files, storage) for "'+name+'"?');
+            if (!ok) return;
             const res = await ipcRenderer.invoke('profiles:clear', name);
-            if (!res.ok) alert(res.error || 'Failed to clear session');
-            else showToast('Session data cleared.');
+            if (!res.ok) alert(res.error || 'Failed to clear profile data.');
+            else showToast('Profile data cleared.');
           };
           authRow.appendChild(clearBtn);
 
@@ -947,10 +1140,10 @@ function createLauncher() {
           resetWinBtn.disabled = !hasWinState;
           resetWinBtn.title = hasWinState ? '' : 'No saved window size/position yet';
           resetWinBtn.onclick = async () => {
-            const ok = confirm('Reset saved window size/position for "'+name+'"?');
+            const ok = await nativeConfirm('Reset saved window size/position for "'+name+'"?');
             if (!ok) return;
             const res = await ipcRenderer.invoke('profiles:resetWinState', name);
-            if (!res.ok) alert(res.error || 'Failed to reset');
+            if (!res.ok) alert(res.error || 'Failed to reset.');
             else {
               await refresh();
               showToast('Saved window size/position reset.');
@@ -975,7 +1168,7 @@ function createLauncher() {
             cloneBtn.textContent = 'Clone Profile';
             cloneBtn.onclick = async () => {
               const res = await ipcRenderer.invoke('profiles:clone', { name });
-              if (!res.ok) return alert(res.error || 'Failed to clone');
+              if (!res.ok) return alert(res.error || 'Failed to clone profile.');
               await refresh();
               showToast('Profile cloned.');
             };
@@ -989,13 +1182,13 @@ function createLauncher() {
           delBtn.title = anySessionOpen() ? 'Close all running sessions to delete profiles.' : '';
           delBtn.onclick = async () => {
             if (anySessionOpen()) return;
-            const ok = confirm('Delete "'+name+'"? This will remove its saved cookies/storage and fully delete its partition folder(s). The launcher will restart to complete deletion.');
+            const ok = await nativeConfirm('Delete "'+name+'"? This will remove its saved cookies, cached files, storage and fully delete its partition folder(s). The launcher will restart to complete deletion.');
             if (!ok) return;
             setUiBusy(true);
             const res = await ipcRenderer.invoke('profiles:delete', { name, clear: true });
             if (!res.ok) {
               setUiBusy(false);
-              return alert(res.error || 'Failed to delete');
+              return alert(res.error || 'Failed to delete profile.');
             }
             if (!res.restarting) {
               setUiBusy(false);
@@ -1091,6 +1284,19 @@ function saveWindowStateForProfile(profileName, win) {
   }
 }
 
+function exitAppNow() {
+  try {
+    quittingApp = true;
+    // force-close all windows without prompts
+    for (const w of BrowserWindow.getAllWindows()) {
+      try { w.__confirmedClose = true; } catch {}
+      try { if (!w.isDestroyed()) w.close(); } catch {}
+    }
+  } finally {
+    app.quit();
+  }
+}
+
 function launchGameWithProfile(name) {
   const profile = getProfileByName(name);
   if (!profile) return;
@@ -1107,7 +1313,7 @@ function launchGameWithProfile(name) {
     autoHideMenuBar: true,
     show: false,
     frame: !!profile.frame,
-    icon: 'icon.png',
+    icon: 'build-res/icon.png',
     webPreferences: {
       backgroundThrottling: false,
       partition: part,
@@ -1126,18 +1332,24 @@ function launchGameWithProfile(name) {
     e.preventDefault();
     const res = await dialog.showMessageBox(win, {
       type: 'question',
-      buttons: ['Exit Session', 'Cancel'],
+      buttons: ['Exit Session', 'Exit FlyffU Launcher', 'Cancel'],
       defaultId: 0,
-      cancelId: 1,
+      cancelId: 2,
       title: 'Exit Session',
       message: 'Exit this game session?',
-      detail: 'Profile: ' + (win.__profileName || name)
+      detail: 'Profile: ' + (win.__profileName || name),
+      noLink: true,
+      normalizeAccessKeys: true
     });
     if (res.response === 0) {
-      // user confirmed
+      // Exit Session
       saveWindowStateForProfile(name, win);
       win.__confirmedClose = true;
       win.close();
+    } else if (res.response === 1) {
+      // Exit FlyffU Launcher
+      saveWindowStateForProfile(name, win);
+      exitAppNow();
     }
   });
 
@@ -1176,7 +1388,7 @@ function launchGameWithProfile(name) {
 
     broadcastActiveUpdate();
 
-    if (getActiveProfileNames().length === 0) {
+    if (!quittingApp && getActiveProfileNames().length === 0) {
       ensureLauncher();
       if (launcherWin && !launcherWin.isDestroyed()) {
         launcherWin.show();
@@ -1261,8 +1473,8 @@ ipcMain.handle('profiles:add', async (_e, payload) => {
   const jobInput = typeof payload === 'object' ? (payload?.job || '') : '';
 
   const name = safeProfileName(nameInput);
-  if (!name) return { ok: false, error: 'Enter a valid name' };
-  if (list.some(p => p.name === name)) return { ok: false, error: 'Name already exists' };
+  if (!name) return { ok: false, error: 'Please enter a valid name.' };
+  if (list.some(p => p.name === name)) return { ok: false, error: 'Name already exists!' };
 
   const job = JOBS_SET.has((jobInput || '').trim()) ? (jobInput || '').trim() : DEFAULT_JOB;
 
@@ -1302,7 +1514,7 @@ ipcMain.handle('profiles:clone', async (_e, { name }) => {
   try {
     await cloneCookiesBetweenPartitions(partitionForProfile(src), newPartition);
   } catch (e) {
-    console.error('Failed to clone session cookies:', e);
+    console.error('Failed to clone profile cookies:', e);
   }
 
   if (launcherWin) launcherWin.webContents.send('profiles:updated');
@@ -1514,7 +1726,7 @@ ipcMain.handle('profiles:clear', async (_e, name) => {
     await s.clearCache().catch(() => {});
     return { ok: true };
   } catch (e) {
-    return { ok: false, error: 'Failed to clear session' };
+    return { ok: false, error: 'Failed to clear profile data.' };
   }
 });
 
@@ -1535,7 +1747,38 @@ ipcMain.handle('profiles:quit', async (_e, name) => {
   return { ok: true };
 });
 
-ipcMain.handle('app:quit', () => app.quit());
+ipcMain.handle('app:check-update', async () => {
+  try {
+    const latest = await fetchLatestReleaseTag();
+    const current = normalizeVersion(pkg.version);
+    const updateAvailable = compareSemver(latest, current) === 1;
+    return { ok: true, latest, current, updateAvailable };
+  } catch (e) {
+    return { ok: false, error: String(e && e.message ? e.message : e) };
+  }
+});
+
+ipcMain.handle('app:quit', () => {
+  quittingApp = true;
+  exitAppNow();
+});
+
+ipcMain.handle('ui:confirm', async (_e, { message, detail, title, yesLabel, noLabel }) => {
+  const parent = (launcherWin && !launcherWin.isDestroyed()) ? launcherWin : BrowserWindow.getFocusedWindow();
+  const buttons = [yesLabel || 'Yes', noLabel || 'No'];
+  const res = await dialog.showMessageBox(parent, {
+    type: 'question',
+    buttons,
+    defaultId: 0,
+    cancelId: 1,
+    title: title || 'Confirm',
+    message: String(message || 'Are you sure?'),
+    detail: detail ? String(detail) : undefined,
+    normalizeAccessKeys: true,
+    noLink: true
+  });
+  return { ok: res.response === 0 };
+});
 
 // ---------- App lifecycle ----------
 
