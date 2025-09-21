@@ -1,8 +1,8 @@
 # FlyffU Launcher <img src="https://github.com/toffeegg/FlyffU-Launcher/blob/main/build-res/icon.png" width="32" height="32" />
 
-A **multi-profile launcher** for [Flyff Universe](https://universe.flyff.com/play). 
+A **multi-profile launcher** for [Flyff Universe](https://universe.flyff.com/play).
 
-<img src="https://github.com/toffeegg/FlyffU-Launcher/blob/main/images/Screenshot%202025-09-21%20165956.png" width="500" height="450" />
+Join our Discord: [discord.gg/DNyvbaPqyt](discord.gg/DNyvbaPqyt)
 
 ## Features
 - Smoother gameplay experience
