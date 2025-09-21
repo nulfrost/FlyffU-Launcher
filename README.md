@@ -2,7 +2,7 @@
 
 A **multi-profile launcher** for [Flyff Universe](https://universe.flyff.com/play). 
 
-<img src="https://github.com/toffeegg/FlyffU-Launcher/blob/main/images/Screenshot%202025-09-21%20165956.png" width="520" height="440" />
+<img src="https://github.com/toffeegg/FlyffU-Launcher/blob/main/images/Screenshot%202025-09-21%20165956.png" width="500" height="450" />
 
 ## Features
 - Smoother gameplay experience
