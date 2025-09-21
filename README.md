@@ -16,7 +16,7 @@ A **multi-profile launcher** for [Flyff Universe](https://universe.flyff.com/pla
 - Global hotkey **Ctrl + Shift + L** to toggle the launcher visibility while playing
 
 ## Quick Start
-Download the latest **version**, run **flyffu-launcher-1.x.x-setup.exe".
+Download the latest **version**, run **flyffu-launcher-1.x.x-setup.exe" .
 
 ## Installation (Dev)
 ```bash
