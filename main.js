@@ -1,5 +1,5 @@
 // main.js
-const { app, BrowserWindow, ipcMain, session, dialog, globalShortcut } = require('electron');
+const { app, BrowserWindow, ipcMain, session, dialog, globalShortcut, shell, nativeImage } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
@@ -22,6 +22,10 @@ const USER_DATA = app.getPath('userData');
 const PROFILES_FILE = path.join(USER_DATA, 'profiles.json');
 const PENDING_FILE = path.join(USER_DATA, 'pending_deletes.json');
 const TRASH_DIR = path.join(USER_DATA, 'Trash');
+
+// Screenshots dir (Pictures/FlyffU Launcher Screenshots)
+const SHOTS_DIR = path.join(app.getPath('pictures'), 'FlyffU Launcher Screenshots');
+try { fs.mkdirSync(SHOTS_DIR, { recursive: true }); } catch {}
 
 // Jobs
 const JOBS = [
@@ -261,12 +265,16 @@ function toggleLauncherVisibility() {
   }
 }
 
-/** Only enable Ctrl+Shift+L when there is at least one active session */
+/** Only enable Ctrl+Shift+L / Ctrl+Shift+P when there is at least one active session */
 function updateGlobalShortcut() {
   globalShortcut.unregister('CommandOrControl+Shift+L');
+  globalShortcut.unregister('CommandOrControl+Shift+P');
   if (getActiveProfileNames().length > 0) {
     globalShortcut.register('CommandOrControl+Shift+L', () => {
       toggleLauncherVisibility();
+    });
+    globalShortcut.register('CommandOrControl+Shift+P', async () => {
+      try { await captureScreenshotOfFocusedSession(); } catch {}
     });
   }
 }
@@ -444,7 +452,7 @@ async function processPendingDeletes() {
   writePendingDeletes(remain);
 }
 
-// ---------- Update check helpers ----------
+// ---------- Update check + News/Tools helpers ----------
 
 function httpGetJson(url, headers = {}) {
   return new Promise((resolve, reject) => {
@@ -465,6 +473,25 @@ function httpGetJson(url, headers = {}) {
           reject(e);
         }
       });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+// Simple text fetch (HTML)
+function httpGetText(url, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, {
+      headers: {
+        'User-Agent': 'FlyffU-Launcher',
+        'Accept': 'text/html,application/xhtml+xml',
+        ...headers
+      }
+    }, (res) => {
+      let data = '';
+      res.on('data', chunk => (data += chunk));
+      res.on('end', () => resolve(data));
     });
     req.on('error', reject);
     req.end();
@@ -493,11 +520,141 @@ async function fetchLatestReleaseTag() {
   return normalizeVersion(json.tag_name || json.name || '');
 }
 
+// ---------- Screenshots & Audio helpers ----------
+
+function getAllGameWindowsForProfile(name) {
+  const set = gameWindows.get(name);
+  if (!set) return [];
+  return Array.from(set).filter(w => w && !w.isDestroyed());
+}
+
+async function captureScreenshotOfFocusedSession() {
+  try {
+    let target = BrowserWindow.getFocusedWindow();
+
+    // Verify it's one of the game windows; else pick a fallback
+    let isGame = false;
+    if (target) {
+      for (const [, set] of gameWindows.entries()) {
+        if (set && set.has(target)) { isGame = true; break; }
+      }
+    }
+
+    if (!isGame) {
+      // NOTE: This "last of iteration" fallback is OK but not guaranteed to be "last used".
+      // Prefer a tracked `lastActiveGameWin` if you have one.
+      const all = [];
+      for (const [, set] of gameWindows.entries()) {
+        for (const w of set) all.push(w);
+      }
+      target = all[all.length - 1];
+    }
+
+    if (!target || target.isDestroyed()) return;
+
+    const image = await target.capturePage();
+    if (!image || image.isEmpty?.()) {
+      // Optional: tell both windows it failed
+      try { await showToastInWindow?.(target, 'Screenshot failed (empty image).'); } catch {}
+      if (launcherWin && !launcherWin.isDestroyed()) {
+        launcherWin.webContents.send('shots:done', { error: 'empty_image' });
+      }
+      return;
+    }
+
+    // Ensure output directory exists (async, non-blocking)
+    try { await fs.promises.mkdir(SHOTS_DIR, { recursive: true }); } catch {}
+
+    const ts = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    const filename = `FlyffU_${ts.getFullYear()}-${pad(ts.getMonth()+1)}-${pad(ts.getDate())}_${pad(ts.getHours())}-${pad(ts.getMinutes())}-${pad(ts.getSeconds())}.png`;
+    const out = path.join(SHOTS_DIR, filename);
+
+    // Write asynchronously
+    const pngBuffer = image.toPNG();
+    await fs.promises.writeFile(out, pngBuffer);
+
+    // Toast inside the session window (best-effort)
+    try { await showToastInWindow?.(target, 'Screenshot saved.'); } catch {}
+
+    // Notify launcher window
+    if (launcherWin && !launcherWin.isDestroyed()) {
+      launcherWin.webContents.send('shots:done', { file: out });
+    }
+
+    return out;
+  } catch (e) {
+    console.error('Screenshot failed:', e);
+    // Optional: launcher toast on error
+    if (launcherWin && !launcherWin.isDestroyed()) {
+      launcherWin.webContents.send('shots:done', { error: String(e && e.message || e) });
+    }
+  }
+}
+
+// Inject a toast into a BrowserWindow's webContents (session window)
+async function showToastInWindow(win, message = 'Screenshot saved.') {
+  if (!win || win.isDestroyed()) return;
+  const js = `
+    (function(){
+      try {
+        const id = '__flyffu_toast_styles__';
+        if (!document.getElementById(id)) {
+          const st = document.createElement('style');
+          st.id = id;
+          st.textContent = \`
+            @keyframes flyffu-toast-in { from {opacity:0; transform: translateY(6px)} to {opacity:1; transform:none} }
+            @keyframes flyffu-toast-out { to {opacity:0; transform: translateY(6px)} }
+            .flyffu-toast-wrap {
+              position: fixed;
+              right: 12px;
+              bottom: 12px;
+              z-index: 2147483647;
+              display: flex;
+              flex-direction: column;
+              gap: 8px;
+              pointer-events: none;
+            }
+            .flyffu-toast {
+              background: rgba(15,22,36,.96);
+              border: 1px solid #1e2a3e;
+              border-left: 3px solid #2c8ae8;
+              padding: 10px 14px;
+              border-radius: 8px;
+              max-width: 150px;
+              color: #d6e6ff;
+              font: 500 13px/1.3 system-ui, -apple-system, Segoe UI, Roboto, Arial;
+              box-shadow: 0 8px 20px rgba(0,0,0,.35);
+              animation: flyffu-toast-in .22s ease forwards;
+			  margin: 10px;
+            }
+            .flyffu-toast.hide { animation: flyffu-toast-out .22s ease forwards }
+          \`;
+          document.head.appendChild(st);
+        }
+        let wrap = document.querySelector('.flyffu-toast-wrap');
+        if (!wrap) {
+          wrap = document.createElement('div');
+          wrap.className = 'flyffu-toast-wrap';
+          document.body.appendChild(wrap);
+        }
+        const el = document.createElement('div');
+        el.className = 'flyffu-toast';
+        el.textContent = ${JSON.stringify(message)};
+        wrap.appendChild(el);
+        setTimeout(() => { el.classList.add('hide'); }, 2200);
+        setTimeout(() => { el.remove(); if (wrap && !wrap.children.length) wrap.remove(); }, 2600);
+      } catch(e) {}
+    })();
+  `;
+  try { await win.webContents.executeJavaScript(js, true); } catch {}
+}
+
 // ---------- UI ----------
 
 function createLauncher() {
   launcherWin = new BrowserWindow({
-    width: 900,
+    width: 1000,
     height: 760,
     resizable: false,
     autoHideMenuBar: true,
@@ -512,6 +669,8 @@ function createLauncher() {
 
   launcherWin.on('close', (e) => {
     if (quittingApp) return;
+	const focused = BrowserWindow.getFocusedWindow();
+
     if (getActiveProfileNames().length > 0) {
       e.preventDefault();
       launcherWin.hide();
@@ -534,26 +693,117 @@ function createLauncher() {
     *{box-sizing:border-box;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial}
     html,body{height:100%}
     body{margin:0;background:var(--bg);color:var(--text);display:flex;flex-direction:column}
-  
+
+    /* Menu bar */
     .top{
       display:flex;align-items:center;gap:8px;
-      padding:10px 12px;border-bottom:1px solid var(--line);
+      padding:2px 8px 2px 8px;border-bottom:1px solid var(--line);
       position:sticky;top:0;background:var(--bg);z-index:1000
     }
-    .brand{display:flex;align-items:center;gap:8px}
-    .muted{color:var(--sub);font-size:11px;line-height:1.25}
-  
-    .wrap{
-      flex:1;display:flex;align-items:center;justify-content:center;
-      padding:0px 12px 12px
+    .menubar{display:flex;align-items:center;gap:8px}
+    .menu-item{font-size:12px;color:#d7e2f1;padding:4px 6px;cursor:pointer;user-select:none}
+    .menu-item:hover{background:#111829}
+    .menu-dropdown{
+      position:absolute;
+      background:#0f1624;
+      padding:6px;
+      min-width:150px;
+      display:flex;
+      flex-direction:column;
+      gap:2px;
+      border-radius:8px;
+      border:1px solid var(--line);
+      box-shadow:0 10px 24px rgba(0,0,0,.4);
+      opacity:0;
+      transform:translateY(-6px) scale(0.98);
+      pointer-events:none;
+      visibility:hidden;
+      transition:
+        opacity .15s ease,
+        transform .15s ease,
+        visibility 0s linear .15s;
     }
-  
+    .menu-dropdown.show{
+      opacity:1;
+      transform:none;
+      pointer-events:auto;
+      visibility:visible;
+      transition:
+        opacity .16s ease,
+        transform .16s ease,
+        visibility 0s;
+    }
+
+    .menu-btn {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      text-align: left;
+      padding: 8px 14px;
+      margin: 2px 0;
+      border: none;
+      border-radius: 0px;
+      background: #0f1624;
+      color: #fff;         
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      letter-spacing: .3px;
+      transition: transform .1s ease, 
+      filter .2s ease, 
+      background .2s ease;
+    }
+    .menu-btn:hover { 
+      filter: brightness(1.25);
+      border-radius: 6px;
+    }
+    .menu-sep{height:1px;background:#22304a;margin:4px 6px}
+	
+    .update-wrap{ margin-left:auto; display:flex; align-items:center; gap:8px }
+    .btn.sm{ padding:0px 3px 0px 3px; font-size:10px; border-radius:3px }
+    .btn.gold {
+  background: linear-gradient(135deg, #d4af37, #b88a1e);
+  color: #000;
+  font-weight: 700;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  box-sizing: border-box;
+  animation: glow 1.5s infinite alternate;
+}
+
+@keyframes glow {
+  from {
+    box-shadow: 0 0 5px 2px #d4af37;
+  }
+  to {
+    box-shadow: 0 0 15px 4px #ffd700;
+  }
+}
+
+	.muted{color:var(--sub);font-size:12px;line-height:1.25;margin-right:5px}
+
+    .wrap{
+      flex:1;display:flex;align-items:stretch;justify-content:center;
+      padding:0 12px 0 3px
+    }
+
+    /* 2-column layout below .top */
+    .content{
+      width:min(1000px, 100vw);
+      display:grid;
+      grid-template-columns: 7fr 3fr; /* 70% / 30% */
+      gap:12px;
+      height:94svh;
+    }
+
     .card {
       display:flex;
       flex-direction:column;
-      width:min(860px, 100vw);
-      height:90svh;
       border-radius:0;
+      background:transparent;
+      min-height:0;
     }
     .card-h {
       flex: 0 0 auto;
@@ -569,7 +819,44 @@ function createLauncher() {
     .card-c{
       flex:1;display:flex;flex-direction:column;padding:1px 12px;min-height:0;
     }
-  
+
+    /* Right column (news) */
+    .news{
+      border:1px solid var(--line);
+	  margin-top:10px;
+	  margin-left:-10px;
+      background:var(--panel-2);
+      border-radius:10px;
+      display:flex;flex-direction:column;
+      min-height:0;
+      overflow:hidden;
+    }
+    .news-h{
+      padding:10px 12px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px;flex:0 0 auto
+    }
+    .news-title{font-size:14px;font-weight:600}
+    .news-c{
+      padding:10px 12px;
+      display:flex;flex-direction:column;gap:8px;
+      flex:1 1 auto;
+	  min-height:0;
+      overflow:auto;
+    }
+	.news-c::-webkit-scrollbar{width:8px}
+    .news-c::-webkit-scrollbar-thumb{background:#1f2633;border-radius:8px}
+    .news-c::-webkit-scrollbar-track{background:transparent}
+    .news-item{
+      padding:9px 10px;border:1px solid #1e2a3e;border-radius:8px;background:#0f1624
+    }
+    .news-item a{color:#8fbaff;text-decoration:none}
+    .news-item a:hover{text-decoration:underline}
+    .news-item .nt{font-size:13px;font-weight:600;color:#d6e6ff}
+    .news-item .ns{font-size:11px;color:#9aa7bd;margin-top:2px}
+    .news-empty{
+      padding:18px;border:1px dashed #263146;border-radius:8px;
+      text-align:center;font-size:13px;color:var(--sub)
+    }
+
     .btn {
       border: none;
       padding: 8px 14px;
@@ -583,10 +870,10 @@ function createLauncher() {
       letter-spacing: .3px;
       transition: transform .1s ease, filter .2s ease, background .2s ease;
     }
-    
+
     .btn:hover { filter: brightness(1.15); }
     .btn:active { transform: scale(.97); }
-    
+
     .btn.primary {
       background: linear-gradient(135deg, #2c8ae8, #1f6fc2);
       color: #fff;
@@ -596,22 +883,22 @@ function createLauncher() {
       filter: brightness(1.15);
       box-shadow: 0 3px 8px rgba(44, 138, 232, 0.45);
     }
-    
+
     .btn.primary:active {
       transform: scale(.97);
       box-shadow: 0 1px 4px rgba(44, 138, 232, 0.25);
     }
-    
+
     .btn.danger {
       background: linear-gradient(135deg, #c62828, #a91d1d);
       color: #fff;
     }
-    
+
     .btn[disabled] {
       opacity: .5;
       cursor: not-allowed;
     }
-    
+
     input[type="text"], select {
       width: 100%;
       padding: 8px 12px;
@@ -629,19 +916,21 @@ function createLauncher() {
       outline: none;
     }
 
+    /* LEFT column list */
     .list{
       flex:1 1 auto;min-height:0;
       display:flex;flex-direction:column;gap:8px;overflow:auto;margin-top:8px;
       scroll-behavior:smooth;
-      padding-right:2px;
+      padding-right:8px;
+	  margin-right: 0;
     }
-  
+
     .row{
       border:1px solid var(--line);background:var(--panel-2);
       border-radius:8px;padding:10px
     }
     .row-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
-	
+
     .name {
       font-weight: 600;
       font-size: 15px;
@@ -656,22 +945,22 @@ function createLauncher() {
     .name:hover { color: #2c8ae8; }
 
     .row-actions{display:flex;gap:6px}
-  
+
     .manage{margin-top:8px;border-top:1px dashed var(--line);padding-top:8px;display:none}
     .manage.show{display:block}
-  
+
     .grid{display:grid;gap:8px}
     .grid.cols-2{grid-template-columns:1fr 1fr}
     .grid.cols-2 > .btn{width:100%}
-  
+
     .empty{
       padding:18px;border:1px dashed #263146;border-radius:8px;
       text-align:center;margin-top:8px;font-size:13px;color:var(--sub)
     }
-  
+
     .create-form{margin-top:8px;display:none}
     .create-form.show{display:block}
-  
+
     .sec-title{font-size:11px;color:var(--sub);margin:6px 0 2px}
     .tag {
       display: inline-block;
@@ -701,87 +990,113 @@ function createLauncher() {
       transform: translateY(6px);
       transition: opacity .25s ease, transform .25s ease;
     }
-    
+
     .toast.show {
       opacity: 1;
       transform: translateY(0);
     }
-    
+
     .toast .tmsg {
       font-size: 13px;
       font-weight: 500;
       color: #d6e6ff;
       letter-spacing: 0.2px;
     }
-  
+
     .drag-handle{cursor:grab;user-select:none;margin-right:6px;font-size:13px;color:#9aa7bd}
     .row.dragging{opacity:.6}
     .drop-indicator{height:6px;border-radius:6px;background:#233046;margin:6px 0;display:none}
     .drop-indicator.show{display:block}
-	
-    .update-wrap{ margin-left:auto; display:flex; align-items:center; gap:8px }
-    .update-badge{ font-size:10px; color:#9aa7bd }
-    .btn.sm{ padding:0px 3px 0px 3px; font-size:10px; border-radius:3px }
-    .btn.gold{ background: linear-gradient(135deg, #d4af37, #b88a1e); color:#000; font-weight:700 }	
-  
-    @media (max-width:860px){
-      .grid.cols-2{grid-template-columns:1fr}
-      .card{width:100%;height:calc(100svh - 90px)}
+
+    @media (max-width:880px){
+      .content{grid-template-columns:1fr} /* Stack on small widths */
     }
-  
+
+    /* Show scrollbar only on profile list */
     .list::-webkit-scrollbar{width:8px}
     .list::-webkit-scrollbar-thumb{background:#1f2633;border-radius:8px}
     .list::-webkit-scrollbar-track{background:transparent}
+
   </style>
 
   </head>
   <body>
     <div class="top">
-      <div class="brand">
-        <div>
-          <div class="muted">Multi-profile launcher by Toffee</div>
+      <div class="menubar">
+        <div class="menu-item" id="menuOptions">Options</div>
+        <div class="menu-item" id="menuTools">Tools</div>
+        <div class="menu-item" id="menuHelp">Help</div>
+
+        <!-- Options dropdown -->
+        <div class="menu-dropdown" id="dropOptions">
+          <button class="menu-btn" id="optImport">Import profiles.json</button>
+          <button class="menu-btn" id="optExport">Export profiles.json</button>
+          <div class="menu-sep"></div>
+          <button class="menu-btn" id="optScreenshots">Open Screenshots folder</button>
+        </div>
+
+        <!-- Tools dropdown -->
+        <div class="menu-dropdown" id="dropTools"></div>
+
+        <!-- Help dropdown -->
+        <div class="menu-dropdown" id="dropHelp">
+          <button class="menu-btn" id="helpShortcuts">Shortcuts</button>
+          <button class="menu-btn" id="helpAbout">About</button>
         </div>
       </div>
-      <div class="update-wrap">
+
+      <div class="update-wrap" style="margin-left:auto">
+	  <button id="updateBtn" class="btn sm gold" style="display:none"></button>
         <div class="muted" id="versionLink">
           <a href="#" onclick="require('electron').shell.openExternal('https://github.com/toffeegg/FlyffU-Launcher/releases')" style="color:inherit;text-decoration:none;">
             Version ${pkg.version}
           </a>
         </div>
-        <button id="updateBtn" class="btn sm gold" style="display:none"></button>
       </div>
     </div>
 
     <div class="wrap">
-      <section class="card">
-        <div class="card-c">
-          <div class="muted hint">Tip: Press <strong>Ctrl + Shift + L</strong> to show/hide this launcher while a session is running.</div>
+      <div class="content">
+        <!-- LEFT: Profiles (70%) -->
+        <section class="card">
+          <div class="card-c">
 
-          <div class="card-h" style="margin-top:10px">
-            <button id="createBtn" class="btn primary" style="max-height:34px">Create Profile</button>
-            <input id="searchInput" type="text" placeholder="Search profile name..." style="max-width:240px">
-            <select id="jobFilter" style="max-width:180px;height:34px;padding:0 8px;">${jobFilterOptions}</select>
-            <span class="muted" id="count">0</span>
-          </div>
-
-          <div id="createForm" class="create-form">
-            <div class="sec-title">Profile Name</div>
-            <div class="grid cols-2">
-              <input id="createName" type="text" placeholder="Profile name (e.g. Main, Alt, FWC)">
-              <select id="createJob">${JOB_OPTIONS_HTML}</select>
+            <div class="card-h" style="margin-top:10px">
+              <button id="createBtn" class="btn primary" style="max-height:34px">Create Profile</button>
+              <input id="searchInput" type="text" placeholder="Search profile name..." style="max-width:240px">
+              <select id="jobFilter" style="max-width:180px;height:34px;padding:0 8px;">${jobFilterOptions}</select>
+              <span class="muted" id="count">0</span>
             </div>
-            <div class="grid cols-2" style="margin-top:8px">
-              <button id="createAdd" class="btn primary">Add</button>
-              <button id="createCancel" class="btn">Cancel</button>
-            </div>
-          </div>
 
-          <div id="emptyState" class="empty" style="display:none">No profiles yet. Create one to get started.</div>
-          <div id="dropAbove" class="drop-indicator"></div>
-          <div id="list" class="list"></div>
-          <div id="dropBelow" class="drop-indicator"></div>
-        </div>
-      </section>
+            <div id="createForm" class="create-form">
+              <div class="sec-title">Profile Name</div>
+              <div class="grid cols-2">
+                <input id="createName" type="text" placeholder="Profile name (e.g. Main, Alt, FWC)">
+                <select id="createJob">${JOB_OPTIONS_HTML}</select>
+              </div>
+              <div class="grid cols-2" style="margin-top:8px">
+                <button id="createAdd" class="btn primary">Add</button>
+                <button id="createCancel" class="btn">Cancel</button>
+              </div>
+            </div>
+
+            <div id="emptyState" class="empty" style="display:none">No profiles yet. Create one to get started.</div>
+            <div id="dropAbove" class="drop-indicator"></div>
+            <div id="list" class="list"></div>
+            <div id="dropBelow" class="drop-indicator"></div>
+          </div>
+        </section>
+
+        <!-- RIGHT: News (30%) -->
+        <aside class="news">
+          <div class="news-h">
+            <div class="news-title">Flyff Universe Newsfeed</div>
+          </div>
+          <div id="newsContainer" class="news-c">
+            <div class="news-empty">Loading…</div>
+          </div>
+        </aside>
+      </div>
     </div>
 
     <div class="toasts" id="toasts"></div>
@@ -794,6 +1109,7 @@ function createLauncher() {
       let filterText = '';
       let jobFilter = 'all';
       let draggingName = null;
+      let audioStates = {}; // { [profileName]: boolean }
 
       const toastsEl = document.getElementById('toasts');
       function showToast(msg) {
@@ -814,25 +1130,191 @@ function createLauncher() {
           const res = await ipcRenderer.invoke('ui:confirm', { message, detail, title });
           return !!(res && res.ok);
         } catch {
-          // Fallback (should rarely happen)
           return window.confirm(message);
         }
       }
 
+      function showShortcutsDialog(){
+        return ipcRenderer.invoke('ui:shortcuts');
+      }
+
+      // ----- Menu logic (click to enter "menu mode", hover to switch, click outside to close) -----
+      const menuOptions = document.getElementById('menuOptions');
+      const menuTools = document.getElementById('menuTools');
+      const menuHelp = document.getElementById('menuHelp');
+      const dropOptions = document.getElementById('dropOptions');
+      const dropTools = document.getElementById('dropTools');
+      const dropHelp = document.getElementById('dropHelp');
+
+      let menuMode = false;
+      let activeMenu = null;
+      let toolsLoaded = false;
+
+      function positionDropdown(anchorEl, dropdownEl){
+        const rect = anchorEl.getBoundingClientRect();
+        dropdownEl.style.left = rect.left + 'px';
+        dropdownEl.style.top = (rect.bottom + 4) + 'px';
+      }
+
+      function closeAllMenus() {
+        dropOptions.classList.remove('show');
+        dropTools.classList.remove('show');
+        dropHelp.classList.remove('show');
+        activeMenu = null;
+      }
+
+      async function ensureToolsItems() {
+        if (toolsLoaded) return;
+        const items = await ipcRenderer.invoke('tools:list');
+        dropTools.innerHTML = '';
+        items.forEach(it => {
+          const btn = document.createElement('button');
+          btn.className = 'menu-btn';
+          btn.textContent = it.title;
+          btn.addEventListener('click', () => {
+            shell.openExternal(it.link);
+            closeAllMenus();
+            menuMode = false;
+          });
+          dropTools.appendChild(btn);
+        });
+        toolsLoaded = true;
+      }
+
+      async function openMenu(key){
+        if (key === 'options') {
+          positionDropdown(menuOptions, dropOptions);
+          dropOptions.classList.add('show');
+          dropTools.classList.remove('show');
+          dropHelp.classList.remove('show');
+          activeMenu = 'options';
+        } else if (key === 'tools') {
+          positionDropdown(menuTools, dropTools);
+          dropTools.classList.add('show');
+          dropOptions.classList.remove('show');
+          dropHelp.classList.remove('show');
+          activeMenu = 'tools';
+          ensureToolsItems();
+        } else if (key === 'help') {
+          positionDropdown(menuHelp, dropHelp);
+          dropHelp.classList.add('show');
+          dropOptions.classList.remove('show');
+          dropTools.classList.remove('show');
+          activeMenu = 'help';
+        }
+      }
+
+      // Outside click closes and exits menu mode
+      document.addEventListener('click', (e) => {
+        const withinMenu = e.target.closest('.menu-item') || e.target.closest('.menu-dropdown');
+        if (!withinMenu) {
+          closeAllMenus();
+          menuMode = false;
+        }
+      });
+	  
+	  // If the window loses focus (user clicks another app / desktop), close menus.
+      window.addEventListener('blur', () => {
+        closeAllMenus();
+        menuMode = false;
+      });
+      
+      // Also when the page becomes hidden (minimize, switch space), close menus.
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+          closeAllMenus();
+          menuMode = false;
+        }
+      });
+
+      // Click to toggle "menu mode" for each menu with a dropdown
+      menuOptions.addEventListener('click', () => {
+        if (menuMode && activeMenu === 'options') {
+          closeAllMenus();
+          menuMode = false;
+        } else {
+          menuMode = true;
+          openMenu('options');
+        }
+      });
+
+      menuTools.addEventListener('click', () => {
+        if (menuMode && activeMenu === 'tools') {
+          closeAllMenus();
+          menuMode = false;
+        } else {
+          menuMode = true;
+          openMenu('tools');
+        }
+      });
+
+      menuHelp.addEventListener('click', () => {
+        if (menuMode && activeMenu === 'help') {
+          closeAllMenus();
+          menuMode = false;
+        } else {
+          menuMode = true;
+          openMenu('help');
+        }
+      });
+
+      // Hover-to-switch only when menuMode is active
+      menuOptions.addEventListener('mouseenter', () => { if (menuMode) openMenu('options'); });
+      menuTools.addEventListener('mouseenter', () => { if (menuMode) openMenu('tools'); });
+      menuHelp.addEventListener('mouseenter', () => { if (menuMode) openMenu('help'); });
+
+      // Help dropdown actions
+      document.getElementById('helpAbout').onclick = async () => {
+        closeAllMenus();
+        menuMode = false;
+        await ipcRenderer.invoke('ui:about');
+      };
+      document.getElementById('helpShortcuts').onclick = async () => {
+        closeAllMenus();
+        menuMode = false;
+        await showShortcutsDialog();
+      };
+
+      // Options actions
+      document.getElementById('optImport').onclick = async () => {
+        closeAllMenus();
+        menuMode = false;
+        const res = await ipcRenderer.invoke('profiles:import');
+        if (res && res.ok) {
+          await refresh();
+          showToast('Profiles imported.');
+        } else if (res && res.error) {
+          alert(res.error);
+        }
+      };
+      document.getElementById('optExport').onclick = async () => {
+        closeAllMenus();
+        menuMode = false;
+        const res = await ipcRenderer.invoke('profiles:export');
+        if (res && res.ok) showToast('Profiles exported.');
+        else if (res && res.error) alert(res.error);
+      };
+      document.getElementById('optScreenshots').onclick = async () => {
+        closeAllMenus();
+        menuMode = false;
+        await ipcRenderer.invoke('shots:open-folder');
+      };
+
       // ----- Update check -----
       const updateBtn = document.getElementById('updateBtn');
-      (async () => {
-        try{
-          const res = await ipcRenderer.invoke('app:check-update');
-          if (res && res.ok && res.updateAvailable) {
-            updateBtn.style.display = '';
-            updateBtn.textContent = 'Update Available — ' + res.latest;
-            updateBtn.onclick = () => shell.openExternal('https://github.com/toffeegg/FlyffU-Launcher/releases');
-            showToast('New version ' + res.latest + ' available.');
-          }
-        } catch {}
+      (async() => {
+          try {
+              const res = await ipcRenderer.invoke('app:check-update');
+              if (res && res.ok && res.updateAvailable) {
+                  updateBtn.style.display = '';
+                  updateBtn.textContent = 'Update available — ' + res.latest;
+                  updateBtn.onclick = () => shell.openExternal('https://github.com/toffeegg/FlyffU-Launcher/releases');
+                  showToast('New version ' + res.latest + ' available.');
+              }
+          } catch {}
       })();
 
+      // ----- Create / Search / Filters -----
       const createBtn = document.getElementById('createBtn');
       const createForm = document.getElementById('createForm');
       const createName = document.getElementById('createName');
@@ -934,6 +1416,13 @@ function createLauncher() {
         } catch {}
       }
 
+      async function queryAudioState(name){
+        try{
+          const res = await ipcRenderer.invoke('profiles:audio-state', name);
+          if (res && res.ok) audioStates[name] = !!res.muted;
+        }catch{}
+      }
+
       function render() {
         const items = applyFilters(profiles);
         countEl.textContent = String(items.length);
@@ -1022,6 +1511,21 @@ function createLauncher() {
 
           const actions = document.createElement('div');
           actions.className = 'row-actions';
+
+          if (isActive(name)) {
+            const muteBtn = document.createElement('button');
+            muteBtn.className = 'btn';
+            muteBtn.textContent = (audioStates[name] ? 'Unmute' : 'Mute');
+            muteBtn.onclick = async () => {
+              const res = await ipcRenderer.invoke('profiles:toggle-audio', name);
+              if (res && res.ok) {
+                audioStates[name] = !!res.muted;
+                muteBtn.textContent = (audioStates[name] ? 'Unmute' : 'Mute');
+                showToast(audioStates[name] ? 'Session muted.' : 'Session unmuted.');
+              }
+            };
+            actions.appendChild(muteBtn);
+          }
 
           const manage = document.createElement('button');
           manage.className = 'btn manage-btn';
@@ -1202,6 +1706,9 @@ function createLauncher() {
 
           row.appendChild(m);
           listEl.appendChild(row);
+
+          // Preload audio state for active sessions
+          if (isActive(name)) { queryAudioState(name); }
         });
       }
 
@@ -1213,12 +1720,76 @@ function createLauncher() {
 
       ipcRenderer.on('profiles:updated', refresh);
       ipcRenderer.on('profiles:active-updated', (_e, a) => { actives = a || []; render(); });
+      ipcRenderer.on('shots:done', (_e, payload) => {
+        if (payload && payload.file) {
+          showToast('Screenshot saved.');
+        }
+      });
 
       ipcRenderer.on('app:restarted-cleanup-complete', () => {
         showToast('Profile list reloaded.');
       });
 
       refresh();
+
+      // ---------- News (right column) ----------
+      const newsEl = document.getElementById('newsContainer');
+
+      function renderNewsItems(items){
+        newsEl.innerHTML = '';
+        if (!items || !items.length) {
+          const empty = document.createElement('div');
+          empty.className = 'news-empty';
+          empty.textContent = 'No updates found.';
+          newsEl.appendChild(empty);
+          return;
+        }
+        items.forEach(item => {
+          const card = document.createElement('div');
+          card.className = 'news-item';
+          card.innerHTML = \`
+            <div class="nt"><a href="#">\${item.title}</a></div>
+            <div class="ns">\${item.section}</div>
+          \`;
+          const a = card.querySelector('a');
+          a.onclick = (e) => {
+            e.preventDefault();
+            try { require('electron').shell.openExternal(item.link); } catch {}
+          };
+          newsEl.appendChild(card);
+        });
+      }
+
+      (async () => {
+        try{
+          const html = await ipcRenderer.invoke('news:get'); // load once on launcher open
+          const doc = new (window.DOMParser)().parseFromString(html, 'text/html');
+
+          // Collect from all three tabs if present
+          function collect(selector, sectionLabel){
+            const anchors = doc.querySelectorAll(selector);
+            const arr = [];
+            anchors.forEach(a => {
+              try{
+                const title = a.querySelector('h5')?.textContent?.trim() || a.textContent.trim();
+                const subtitle = a.querySelector('h6')?.textContent?.trim() || '';
+                const href = a.getAttribute('href');
+                if (href && title) arr.push({ title, subtitle, link: href.startsWith('http') ? href : ('https://universe.flyff.com' + href), section: sectionLabel });
+              }catch {}
+            });
+            return arr;
+          }
+
+          const updates = collect('#nav-1 .card a', 'Updates');
+          const events = collect('#nav-2 .card a', 'Events');
+          const shop   = collect('#nav-3 .card a', 'Item Shop News');
+
+          const combined = [...updates, ...events, ...shop];
+          renderNewsItems(combined);
+        } catch (e){
+          renderNewsItems([]);
+        }
+      })();
     </script>
   </body>
   </html>`;
@@ -1368,7 +1939,7 @@ function launchGameWithProfile(name) {
         modal: false,
         autoHideMenuBar: true,
         frame: true,
-        width: 900,
+        width: 1000,
         height: 700,
         webPreferences: {
           partition: part,
@@ -1747,6 +2318,72 @@ ipcMain.handle('profiles:quit', async (_e, name) => {
   return { ok: true };
 });
 
+// Audio state (mute/unmute)
+ipcMain.handle('profiles:audio-state', async (_e, name) => {
+  const wins = getAllGameWindowsForProfile(name);
+  if (wins.length === 0) return { ok: true, muted: false };
+  // If any is unmuted, report unmuted; else muted
+  const anyUnmuted = wins.some(w => !w.webContents.isAudioMuted());
+  return { ok: true, muted: !anyUnmuted };
+});
+
+ipcMain.handle('profiles:toggle-audio', async (_e, name) => {
+  const wins = getAllGameWindowsForProfile(name);
+  if (wins.length === 0) return { ok: false, error: 'No active session.' };
+  const currentlyMuted = wins.every(w => w.webContents.isAudioMuted());
+  const next = !currentlyMuted ? true : false;
+  for (const w of wins) {
+    try { w.webContents.setAudioMuted(next); } catch {}
+  }
+  return { ok: true, muted: next };
+});
+
+// Import/Export profiles.json
+ipcMain.handle('profiles:export', async () => {
+  try {
+    const { filePath, canceled } = await dialog.showSaveDialog({
+      title: 'Export profiles.json',
+      defaultPath: path.join(app.getPath('documents'), 'profiles.json'),
+      filters: [{ name: 'JSON', extensions: ['json'] }]
+    });
+    if (canceled || !filePath) return { ok: false };
+    const data = JSON.stringify(readProfiles(), null, 2);
+    fs.writeFileSync(filePath, data, 'utf8');
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: 'Failed to export: ' + (e.message || e) };
+  }
+});
+
+ipcMain.handle('profiles:import', async () => {
+  try {
+    const { filePaths, canceled } = await dialog.showOpenDialog({
+      title: 'Import profiles.json',
+      properties: ['openFile'],
+      filters: [{ name: 'JSON', extensions: ['json'] }]
+    });
+    if (canceled || !filePaths || !filePaths[0]) return { ok: false };
+    const raw = fs.readFileSync(filePaths[0], 'utf8');
+    const arr = JSON.parse(raw);
+    const normalized = normalizeProfiles(arr);
+    writeProfiles(normalized);
+    if (launcherWin) launcherWin.webContents.send('profiles:updated');
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: 'Failed to import: ' + (e.message || e) };
+  }
+});
+
+// Open screenshots folder
+ipcMain.handle('shots:open-folder', async () => {
+  try {
+    await shell.openPath(SHOTS_DIR);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: 'Failed to open folder' };
+  }
+});
+
 ipcMain.handle('app:check-update', async () => {
   try {
     const latest = await fetchLatestReleaseTag();
@@ -1756,6 +2393,30 @@ ipcMain.handle('app:check-update', async () => {
   } catch (e) {
     return { ok: false, error: String(e && e.message ? e.message : e) };
   }
+});
+
+// Fetch news HTML once on demand
+ipcMain.handle('news:get', async () => {
+  try {
+    const html = await httpGetText('https://universe.flyff.com/news');
+    return html;
+  } catch (e) {
+    return '';
+  }
+});
+
+// Tools drop-items
+ipcMain.handle('tools:list', async () => {
+  return [
+    { title: 'Flyffipedia', link: 'https://flyffipedia.com/' },
+    { title: 'Gothante', link: 'https://gothante.wiki/' },
+    { title: 'Madrigalinside', link: 'https://madrigalinside.com/' },
+    { title: 'Flyff.me', link: 'https://www.flyff.me/' },
+    { title: 'SiegeStats', link: 'https://siegestats.cc/' },
+    { title: 'Flyff Model Viewer', link: 'https://flyffmodelviewer.com/' },
+    { title: 'Flyffulator', link: 'https://flyffulator.com/' },
+    { title: 'Farmito Flyff', link: 'https://farmito-flyff.me/' }
+  ];
 });
 
 ipcMain.handle('app:quit', () => {
@@ -1779,6 +2440,183 @@ ipcMain.handle('ui:confirm', async (_e, { message, detail, title, yesLabel, noLa
   });
   return { ok: res.response === 0 };
 });
+
+ipcMain.handle('ui:alert', async (_e, { message, title }) => {
+  const parent = (launcherWin && !launcherWin.isDestroyed()) ? launcherWin : BrowserWindow.getFocusedWindow();
+  await dialog.showMessageBox(parent, {
+    type: 'info',
+    buttons: ['OK'],
+    defaultId: 0,
+    title: title || 'Info',
+    message: String(message || '')
+  });
+  return { ok: true };
+});
+
+ipcMain.handle('ui:about', async () => {
+  const parent = (launcherWin && !launcherWin.isDestroyed())
+    ? launcherWin
+    : BrowserWindow.getFocusedWindow();
+
+  const iconPath = path.join(__dirname, 'build-res', 'icon.png');
+  const iconDataUrl = nativeImage.createFromPath(iconPath)
+    .resize({ width: 40, height: 40 })  // optional
+    .toDataURL();
+
+  const aboutWin = new BrowserWindow({
+    parent,
+    modal: true,
+    width: 400,
+    height: 300,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    autoHideMenuBar: true,
+    show: false,
+    icon: iconPath,
+    backgroundColor: '#0b0f16',
+    webPreferences: {
+      nodeIntegration: true,
+      contextIsolation: false,
+      backgroundThrottling: false,
+      // keep webSecurity true; we don't need file:// anymore
+    },
+  });
+
+  const html = `
+  <!doctype html>
+  <html>
+  <head>
+    <meta charset="utf-8" />
+    <title>About</title>
+    <style>
+      :root{ --bg:#0b0f16; --text:#e6edf3; --sub:#9aa7bd; }
+      *{box-sizing:border-box;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial}
+      html,body{height:100%}
+      body{margin:0;background:var(--bg);color:var(--text);display:flex;align-items:center;justify-content:center}
+      .wrap{width:min(92vw,440px);padding:8px 6px}
+      .head{display:flex;align-items:center;gap:12px;margin-bottom:10px}
+      .head img{width:40px;height:40px;border-radius:10px}
+      .title{font-size:18px;font-weight:800;letter-spacing:.2px}
+      .sub{font-size:12px;color:var(--sub)}
+	  .abt{font-size:12px;justify-content:center;align-items:center}
+      .row{font-size:13px;margin:6px 2px;letter-spacing:.2px;display:flex;justify-content:center;align-items:center;gap:14px;flex-wrap:wrap;}.row a{color:#9ab4ff;text-decoration:underline;text-underline-offset:2px;text-decoration-thickness:1px;}.row a:hover{filter:brightness(1.15);}
+      a{color:#8fbaff;text-decoration:none}
+      a:hover{text-decoration:underline}
+    </style>
+  </head>
+  
+  <body>
+    <div class="wrap">
+      <div class="head">
+        <img src="${iconDataUrl}" alt="icon">
+        <div>
+          <div class="title">FlyffU Launcher v${pkg.version}</div>
+          <div class="sub">Multi-profile launcher for Flyff Universe by Toffee</div>
+        </div>
+      </div>
+	  
+	  <div class="abt">
+	  FlyffU Launcher is an open-source multi-profile launcher for Flyff Universe, built by Toffee and community contributors.
+	  <br/><br/>
+	  FlyffU Launcher packs isolated profiles, instant screenshots, streamlined session controls, and a built-in news pane. Run multiple sessions effortlessly, with saved window layouts and neatly organized profiles for a smoother, more focused play experience.
+	  </div>
+	  
+	  <br/>
+	  
+      <div class="row">
+        <a href="#" data-link="https://discord.gg/DNyvbaPqyt">Discord</a>
+        <a href="#" data-link="https://github.com/toffeegg/FlyffU-Launcher">GitHub</a>
+		<a href="#" data-link="https://github.com/toffeegg/FlyffU-Launcher/blob/main/privacy-policy.md">Privacy Policy</a>
+		<a href="#" data-link="https://github.com/toffeegg/FlyffU-Launcher/blob/main/LICENSE">License</a>
+      </div>
+	</div>
+	
+    <script>
+      const { shell } = require('electron');
+      document.querySelectorAll('a[data-link]').forEach(a=>{
+        a.addEventListener('click', (e) => {
+          e.preventDefault();
+          shell.openExternal(a.getAttribute('data-link'));
+        });
+      });
+      window.addEventListener('keydown', (e)=>{ if(e.key==='Escape') window.close(); });
+    </script>
+  </body>
+  </html>`.trim();
+
+  aboutWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+  aboutWin.once('ready-to-show', () => aboutWin.show());
+  return { ok: true };
+});
+
+ipcMain.handle('ui:shortcuts', async () => {
+  const parent = (launcherWin && !launcherWin.isDestroyed())
+    ? launcherWin
+    : BrowserWindow.getFocusedWindow();
+
+  const iconPath = path.join(__dirname, 'build-res', 'icon.png');
+  const iconDataUrl = nativeImage.createFromPath(iconPath)
+    .resize({ width: 40, height: 40 })
+    .toDataURL();
+
+  const win = new BrowserWindow({
+    parent,
+    modal: true,
+    width: 400,
+    height: 200,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    autoHideMenuBar: true,
+    show: false,
+    icon: iconPath,
+    backgroundColor: '#0b0f16',
+    webPreferences: {
+      nodeIntegration: true,
+      contextIsolation: false,
+      backgroundThrottling: false,
+    },
+  });
+
+  const html = `
+  <!doctype html>
+  <html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Shortcuts</title>
+    <style>
+      :root{ --bg:#0b0f16; --text:#e6edf3; --sub:#9aa7bd; --line:#1c2533; }
+      *{box-sizing:border-box;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial}
+      html,body{height:100%}
+      body{margin:0;background:var(--bg);color:var(--text);display:flex;align-items:center;justify-content:center}
+      .wrap{width:min(92vw,460px);padding:12px}
+      .list{display:flex;flex-direction:column;gap:8px}
+      .item{display:flex;align-items:center;justify-content:space-between;background:#0f1624;border:1px solid #1e2a3e;border-radius:8px;padding:10px 12px}
+      .label{font-size:13px;color:#d6e6ff}
+      .kbd{font:600 12px/1.2 ui-monospace,SFMono-Regular,Consolas,Monaco,monospace;background:#0b1220;border:1px solid #1e2a3e;border-bottom-width:2px;padding:6px 8px;border-radius:6px}
+      a{color:#8fbaff;text-decoration:none}
+      a:hover{text-decoration:underline}
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="list">
+        <div class="item"><div class="label">Toggle Launcher</div><div class="kbd">Ctrl + Shift + L</div></div>
+        <div class="item"><div class="label">Screenshot focused session</div><div class="kbd">Ctrl + Shift + P</div></div>
+      </div>
+    </div>
+    <script>
+      window.addEventListener('keydown', (e)=>{ if(e.key==='Escape') window.close(); });
+    </script>
+  </body>
+  </html>`.trim();
+
+  win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+  win.once('ready-to-show', () => win.show());
+  return { ok: true };
+});
+
 
 // ---------- App lifecycle ----------
 
