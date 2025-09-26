@@ -1,4 +1,4 @@
-# FlyffU Launcher <img src="https://github.com/toffeegg/FlyffU-Launcher/blob/main/build-res/icon.png" width="32" height="32" />
+# FlyffU Launcher <img src="https://github.com/toffeegg/FlyffU-Launcher/blob/main/icon.png" width="32" height="32" />
 
 A **multi-profile launcher** for [Flyff Universe](https://universe.flyff.com/play).
 
