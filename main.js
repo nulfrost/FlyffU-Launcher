@@ -189,7 +189,7 @@ function normalizeProfiles(arr) {
       const frame = !!item?.frame;
       const isClone = (typeof item?.isClone === 'boolean') ? item.isClone : inferIsCloneFromName(name);
       const winState = (item && typeof item.winState === 'object') ? sanitizeWinState(item.winState) : undefined;
-      return { name, job, partition, frame, isClone, winState };
+      return { name, job, partition, frame, isClone, winState, muted: !!item?.muted };
     })
     .filter(Boolean);
 }
@@ -265,14 +265,61 @@ function toggleLauncherVisibility() {
   }
 }
 
-/** Only enable Ctrl+Shift+L / Ctrl+Shift+P when there is at least one active session */
+// Inside updateGlobalShortcut(), fully updated with audio sync
+
 function updateGlobalShortcut() {
   globalShortcut.unregister('CommandOrControl+Shift+L');
+  globalShortcut.unregister('CommandOrControl+Shift+M');
   globalShortcut.unregister('CommandOrControl+Shift+P');
+
   if (getActiveProfileNames().length > 0) {
     globalShortcut.register('CommandOrControl+Shift+L', () => {
       toggleLauncherVisibility();
     });
+
+    globalShortcut.register('CommandOrControl+Shift+M', async () => {
+      try {
+        let target = BrowserWindow.getFocusedWindow();
+        let profileName = null;
+
+        if (target) {
+          for (const [name, set] of gameWindows.entries()) {
+            if (set && set.has(target)) { profileName = name; break; }
+          }
+        }
+
+        if (!profileName) {
+          const all = [];
+          for (const [name, set] of gameWindows.entries()) {
+            for (const w of set) all.push({ name, w });
+          }
+          if (all.length) profileName = all[all.length - 1].name;
+        }
+
+        if (profileName) {
+          const wins = getAllGameWindowsForProfile(profileName);
+          if (!wins.length) return;
+
+          const currentlyMuted = wins.every(w => w.webContents.isAudioMuted());
+          const next = !currentlyMuted;
+          for (const w of wins) {
+            try { w.webContents.setAudioMuted(next); } catch {}
+          }
+
+          const msg = next ? 'Session muted.' : 'Session unmuted.';
+          for (const w of wins) {
+            try { await showToastInWindow(w, msg); } catch {}
+          }
+
+          if (launcherWin && !launcherWin.isDestroyed()) {
+            launcherWin.webContents.send('profiles:audio-updated', { name: profileName, muted: next });
+          }
+        }
+      } catch (e) {
+        console.error('Mute shortcut failed:', e);
+      }
+    });
+	
     globalShortcut.register('CommandOrControl+Shift+P', async () => {
       try { await captureScreenshotOfFocusedSession(); } catch {}
     });
@@ -626,7 +673,7 @@ async function showToastInWindow(win, message = 'Screenshot saved.') {
               font: 500 13px/1.3 system-ui, -apple-system, Segoe UI, Roboto, Arial;
               box-shadow: 0 8px 20px rgba(0,0,0,.35);
               animation: flyffu-toast-in .22s ease forwards;
-			  margin: 10px;
+			  margin: 10px 10px -2px 10px;
             }
             .flyffu-toast.hide { animation: flyffu-toast-out .22s ease forwards }
           \`;
@@ -659,7 +706,7 @@ function createLauncher() {
     resizable: false,
     autoHideMenuBar: true,
     show: false,
-    icon: 'build-res/icon.png',
+    icon: 'icon.png',
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
@@ -670,6 +717,7 @@ function createLauncher() {
   launcherWin.on('close', (e) => {
     if (quittingApp) return;
 	const focused = BrowserWindow.getFocusedWindow();
+	if (focused && focused !== launcherWin) return;
 
     if (getActiveProfileNames().length > 0) {
       e.preventDefault();
@@ -763,24 +811,24 @@ function createLauncher() {
     .update-wrap{ margin-left:auto; display:flex; align-items:center; gap:8px }
     .btn.sm{ padding:0px 3px 0px 3px; font-size:10px; border-radius:3px }
     .btn.gold {
-  background: linear-gradient(135deg, #d4af37, #b88a1e);
-  color: #000;
-  font-weight: 700;
-  border: none;
-  border-radius: 8px;
-  cursor: pointer;
-  box-sizing: border-box;
-  animation: glow 1.5s infinite alternate;
-}
-
-@keyframes glow {
-  from {
-    box-shadow: 0 0 5px 2px #d4af37;
-  }
-  to {
-    box-shadow: 0 0 15px 4px #ffd700;
-  }
-}
+    background: linear-gradient(135deg, #d4af37, #b88a1e);
+    color: #000;
+    font-weight: 700;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    box-sizing: border-box;
+    animation: glow 1.5s infinite alternate;
+	}
+	
+	@keyframes glow {
+	  from {
+	    box-shadow: 0 0 5px 2px #d4af37;
+	  }
+	  to {
+	    box-shadow: 0 0 15px 4px #ffd700;
+	  }
+	}
 
 	.muted{color:var(--sub);font-size:12px;line-height:1.25;margin-right:5px}
 
@@ -852,6 +900,9 @@ function createLauncher() {
     .news-item a:hover{text-decoration:underline}
     .news-item .nt{font-size:13px;font-weight:600;color:#d6e6ff}
     .news-item .ns{font-size:11px;color:#9aa7bd;margin-top:2px}
+	.news-item:hover {
+    background: var(--panel-5);
+    }
     .news-empty{
       padding:18px;border:1px dashed #263146;border-radius:8px;
       text-align:center;font-size:13px;color:var(--sub)
@@ -929,8 +980,18 @@ function createLauncher() {
       border:1px solid var(--line);background:var(--panel-2);
       border-radius:8px;padding:10px
     }
-    .row-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
-
+	.row:hover {
+    background: var(--panel-5);
+    }
+	.row:hover .name {
+    color: #2c8ae8;
+    }
+    .row-top{
+	display:flex;
+	align-items:center;
+	justify-content:space-between;
+	gap:8px
+    }
     .name {
       font-weight: 600;
       font-size: 15px;
@@ -942,7 +1003,6 @@ function createLauncher() {
       letter-spacing: 0.2px;
       transition: color .2s ease;
     }
-    .name:hover { color: #2c8ae8; }
 
     .row-actions{display:flex;gap:6px}
 
@@ -1017,6 +1077,25 @@ function createLauncher() {
     .list::-webkit-scrollbar-thumb{background:#1f2633;border-radius:8px}
     .list::-webkit-scrollbar-track{background:transparent}
 
+    .tips {
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      border-radius: 8px;
+      padding: 10px;
+      margin-top: 12px;
+      font-size: 13px;
+      color: var(--sub);
+    }
+    .tips-title {
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 6px;
+    }
+    .tips-content {
+      margin-bottom: 8px;
+      line-height: 1.4;
+    }
+
   </style>
 
   </head>
@@ -1084,6 +1163,12 @@ function createLauncher() {
             <div id="dropAbove" class="drop-indicator"></div>
             <div id="list" class="list"></div>
             <div id="dropBelow" class="drop-indicator"></div>
+			
+			<div id="tipsBox" class="tips">
+			<div class="tips-title">💡 Tip</div>
+			<div id="tipsContent" class="tips-content"></div>
+			</div>
+
           </div>
         </section>
 
@@ -1720,6 +1805,10 @@ function createLauncher() {
 
       ipcRenderer.on('profiles:updated', refresh);
       ipcRenderer.on('profiles:active-updated', (_e, a) => { actives = a || []; render(); });
+      ipcRenderer.on('profiles:audio-updated', (_e, { name, muted }) => {
+        audioStates[name] = !!muted;
+        render();
+      });
       ipcRenderer.on('shots:done', (_e, payload) => {
         if (payload && payload.file) {
           showToast('Screenshot saved.');
@@ -1731,6 +1820,73 @@ function createLauncher() {
       });
 
       refresh();
+
+      // ---------- Tips dialog ----------
+	  
+      const tips = [
+        "Use Ctrl+Shift+L to show or hide the launcher while playing.",
+        "Import or export profiles via Options → Import/Export.",
+        "Press Ctrl+Shift+P to capture a screenshot of the focused session.",
+        "Access your screenshots from Options → Open Screenshots folder.",
+        "Use Ctrl+Shift+M to mute or unmute your current session.",
+        "Drag and reorder your profiles — the order is saved automatically.",
+        "Filter profiles quickly by typing in the search bar.",
+        "Use the job dropdown to filter characters by their class.",
+        "Clone an existing profile to copy its settings instantly.",
+        "Enable or disable a window frame per profile in Manage settings.",
+        "Reset saved window size or position from the Manage panel if needed.",
+        "Rename a profile by right-clicking it in the list.",
+        "Clear profile data (cookies, cache, storage) safely from Manage.",
+        "Quit a running session directly from the launcher with one click.",
+        "Check for updates — a gold button will appear when a new version is available."
+      ];
+
+      function shuffle(array) {
+        for (let i = array.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [array[i], array[j]] = [array[j], array[i]];
+        }
+        return array;
+      }
+      
+      function initTips() {
+        const tipsBox = document.getElementById("tipsBox");
+        const tipsContent = document.getElementById("tipsContent");
+        if (!tipsBox || !tipsContent) return;
+      
+        let shuffledTips = shuffle([...tips]);
+        let tipIndex = 0;
+        let intervalId;
+      
+        function showTip() {
+          tipsContent.textContent = shuffledTips[tipIndex];
+          tipIndex = (tipIndex + 1) % shuffledTips.length;
+          if (tipIndex === 0) {
+            shuffledTips = shuffle([...tips]); // reshuffle after each cycle
+          }
+        }
+      
+        function startRotation() {
+          if (!intervalId) {
+            intervalId = setInterval(showTip, 8000);
+          }
+        }
+      
+        function stopRotation() {
+          clearInterval(intervalId);
+          intervalId = null;
+        }
+      
+        // Initial tip
+        showTip();
+        startRotation();
+      
+        // Pause/resume on hover
+        tipsBox.addEventListener("mouseenter", stopRotation);
+        tipsBox.addEventListener("mouseleave", startRotation);
+      }
+      
+      window.addEventListener("DOMContentLoaded", initTips);
 
       // ---------- News (right column) ----------
       const newsEl = document.getElementById('newsContainer');
@@ -1884,7 +2040,7 @@ function launchGameWithProfile(name) {
     autoHideMenuBar: true,
     show: false,
     frame: !!profile.frame,
-    icon: 'build-res/icon.png',
+    icon: 'icon.png',
     webPreferences: {
       backgroundThrottling: false,
       partition: part,
@@ -1893,6 +2049,10 @@ function launchGameWithProfile(name) {
   });
 
   win.__profileName = name;
+  
+  if (profile.muted) {
+    try { win.webContents.setAudioMuted(true); } catch {}
+  }
 
   win.on('close', async (e) => {
     if (win.__confirmedClose) {
@@ -1918,9 +2078,24 @@ function launchGameWithProfile(name) {
       win.__confirmedClose = true;
       win.close();
     } else if (res.response === 1) {
-      // Exit FlyffU Launcher
-      saveWindowStateForProfile(name, win);
-      exitAppNow();
+    // Exit FlyffU Launcher
+    saveWindowStateForProfile(name, win);
+    
+    if (getActiveProfileNames().length > 1) {
+      const confirm = await dialog.showMessageBox(win, {
+        type: 'warning',
+        buttons: ['Yes, Exit All', 'Cancel'],
+        defaultId: 0,
+        cancelId: 1,
+        title: 'Confirm Exit',
+        message: 'Multiple sessions are still running.',
+        detail: 'Are you sure you want to close FlyffU Launcher and all running profiles?',
+        noLink: true,
+        normalizeAccessKeys: true
+      });
+      if (confirm.response !== 0) return; // user cancelled
+    }
+    exitAppNow();
     }
   });
 
@@ -2320,21 +2495,50 @@ ipcMain.handle('profiles:quit', async (_e, name) => {
 
 // Audio state (mute/unmute)
 ipcMain.handle('profiles:audio-state', async (_e, name) => {
+  const list = readProfiles();
+  const idx = getProfileIndex(list, name);
+  if (idx === -1) return { ok: false, error: 'Profile not found' };
+
   const wins = getAllGameWindowsForProfile(name);
-  if (wins.length === 0) return { ok: true, muted: false };
-  // If any is unmuted, report unmuted; else muted
+  if (wins.length === 0) {
+    return { ok: true, muted: !!list[idx].muted };
+  }
+
   const anyUnmuted = wins.some(w => !w.webContents.isAudioMuted());
-  return { ok: true, muted: !anyUnmuted };
+  const muted = !anyUnmuted;
+
+  // Sync to profile storage
+  list[idx].muted = muted;
+  writeProfiles(list);
+
+  return { ok: true, muted };
 });
 
 ipcMain.handle('profiles:toggle-audio', async (_e, name) => {
+  const list = readProfiles();
+  const idx = getProfileIndex(list, name);
+  if (idx === -1) return { ok: false, error: 'Profile not found' };
+
   const wins = getAllGameWindowsForProfile(name);
-  if (wins.length === 0) return { ok: false, error: 'No active session.' };
-  const currentlyMuted = wins.every(w => w.webContents.isAudioMuted());
-  const next = !currentlyMuted ? true : false;
-  for (const w of wins) {
-    try { w.webContents.setAudioMuted(next); } catch {}
+  let next;
+  if (wins.length === 0) {
+    next = !list[idx].muted;
+  } else {
+    const currentlyMuted = wins.every(w => w.webContents.isAudioMuted());
+    next = !currentlyMuted;
+    for (const w of wins) {
+      try { w.webContents.setAudioMuted(next); } catch {}
+    }
   }
+
+  // Save state to profile
+  list[idx].muted = next;
+  writeProfiles(list);
+
+  if (launcherWin && !launcherWin.isDestroyed()) {
+    launcherWin.webContents.send('profiles:audio-updated', { name, muted: next });
+  }
+
   return { ok: true, muted: next };
 });
 
@@ -2458,9 +2662,9 @@ ipcMain.handle('ui:about', async () => {
     ? launcherWin
     : BrowserWindow.getFocusedWindow();
 
-  const iconPath = path.join(__dirname, 'build-res', 'icon.png');
+  const iconPath = path.join(__dirname, 'icon.png');
   const iconDataUrl = nativeImage.createFromPath(iconPath)
-    .resize({ width: 40, height: 40 })  // optional
+    .resize({ width: 40, height: 40 })
     .toDataURL();
 
   const aboutWin = new BrowserWindow({
@@ -2554,23 +2758,23 @@ ipcMain.handle('ui:shortcuts', async () => {
   const parent = (launcherWin && !launcherWin.isDestroyed())
     ? launcherWin
     : BrowserWindow.getFocusedWindow();
-
-  const iconPath = path.join(__dirname, 'build-res', 'icon.png');
+	
+  const iconPath = path.join(__dirname, 'icon.png');
   const iconDataUrl = nativeImage.createFromPath(iconPath)
     .resize({ width: 40, height: 40 })
-    .toDataURL();
+    .toDataURL();	
 
   const win = new BrowserWindow({
     parent,
     modal: true,
     width: 400,
-    height: 200,
+    height: 250,
     resizable: false,
     minimizable: false,
     maximizable: false,
     autoHideMenuBar: true,
     show: false,
-    icon: iconPath,
+    icon: iconPath,	
     backgroundColor: '#0b0f16',
     webPreferences: {
       nodeIntegration: true,
@@ -2603,6 +2807,7 @@ ipcMain.handle('ui:shortcuts', async () => {
     <div class="wrap">
       <div class="list">
         <div class="item"><div class="label">Toggle Launcher</div><div class="kbd">Ctrl + Shift + L</div></div>
+		<div class="item"><div class="label">Mute/Unmute focused session</div><div class="kbd">Ctrl + Shift + M</div></div>
         <div class="item"><div class="label">Screenshot focused session</div><div class="kbd">Ctrl + Shift + P</div></div>
       </div>
     </div>

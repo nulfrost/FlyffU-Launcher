@@ -1,6 +1,6 @@
 {
   "name": "flyffu-launcher",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "main": "main.js",
   "author": "Toffee <toffeeplaysgg@gmail.com>",
   "license": "MIT",
@@ -15,12 +15,11 @@
     "appId": "toffee.gg.flyffu",
     "productName": "FlyffU Launcher",
     "directories": {
-      "buildResources": "build-res",
       "output": "dist"
     },
     "win": {
       "target": "nsis",
-      "icon": "build-res/icon.ico",
+      "icon": "icon.ico",
       "artifactName": "flyffu-launcher-${version}-setup.${ext}"
     }
   },
