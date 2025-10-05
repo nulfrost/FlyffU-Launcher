@@ -22,6 +22,7 @@ const USER_DATA = app.getPath('userData');
 const PROFILES_FILE = path.join(USER_DATA, 'profiles.json');
 const PENDING_FILE = path.join(USER_DATA, 'pending_deletes.json');
 const TRASH_DIR = path.join(USER_DATA, 'Trash');
+const SETTINGS_FILE = path.join(USER_DATA, 'settings.json');
 
 // Screenshots dir (Pictures/FlyffU Launcher Screenshots)
 const SHOTS_DIR = path.join(app.getPath('pictures'), 'FlyffU Launcher Screenshots');
@@ -55,6 +56,27 @@ const JOBS_SET = new Set(JOBS);
 const DEFAULT_JOB = 'Vagrant';
 const JOB_OPTIONS_HTML = JOBS.map(j => `<option value="${j}">${j}</option>`).join('');
 
+// ---------- Settings ----------
+function readSettings() {
+  try {
+    if (!fs.existsSync(SETTINGS_FILE)) return { stayOpenAfterLaunch: false };
+    const raw = fs.readFileSync(SETTINGS_FILE, 'utf8');
+    const json = JSON.parse(raw);
+    return {
+      stayOpenAfterLaunch: (typeof json.stayOpenAfterLaunch === 'boolean') ? json.stayOpenAfterLaunch : false
+    };
+  } catch {
+    return { stayOpenAfterLaunch: false };
+  }
+}
+function writeSettings(s) {
+  try {
+    fs.mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(s, null, 2), 'utf8');
+  } catch {}
+}
+let settings = readSettings();
+
 // Single-instance lock
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
@@ -72,7 +94,7 @@ if (!gotTheLock) {
 
 // ---------- Profiles storage helpers ----------
 
-/** @typedef {{name:string, job:string, partition:string, frame?:boolean, isClone?:boolean, winState?:{bounds?:{x?:number,y?:number,width:number,height:number}, isMaximized?:boolean}}} Profile */
+/** @typedef {{name:string, job:string, partition:string, frame?:boolean, isClone?:boolean, winState?:{bounds?:{x?:number,y?:number,width:number,height:number}, isMaximized?:boolean}, muted?:boolean}} Profile */
 
 function readRawProfiles() {
   try {
@@ -257,11 +279,15 @@ function ensureLauncher() {
 
 function toggleLauncherVisibility() {
   ensureLauncher();
-  if (launcherWin.isVisible()) {
-    launcherWin.hide();
-  } else {
+  if (!launcherWin) return;
+
+  const shouldShow = !launcherWin.isVisible() || !launcherWin.isFocused();
+
+  if (shouldShow) {
     launcherWin.show();
     launcherWin.focus();
+  } else {
+    launcherWin.hide();
   }
 }
 
@@ -271,12 +297,16 @@ function updateGlobalShortcut() {
   globalShortcut.unregister('CommandOrControl+Shift+L');
   globalShortcut.unregister('CommandOrControl+Shift+M');
   globalShortcut.unregister('CommandOrControl+Shift+P');
+  globalShortcut.unregister('Control+Tab');
+  globalShortcut.unregister('Control+Shift+Tab');
 
   if (getActiveProfileNames().length > 0) {
+    // Toggle launcher visibility
     globalShortcut.register('CommandOrControl+Shift+L', () => {
       toggleLauncherVisibility();
     });
 
+    // Mute/unmute current session
     globalShortcut.register('CommandOrControl+Shift+M', async () => {
       try {
         let target = BrowserWindow.getFocusedWindow();
@@ -319,10 +349,43 @@ function updateGlobalShortcut() {
         console.error('Mute shortcut failed:', e);
       }
     });
-	
+
+    // Screenshot of focused session
     globalShortcut.register('CommandOrControl+Shift+P', async () => {
       try { await captureScreenshotOfFocusedSession(); } catch {}
     });
+
+    // --- Session switching (Ctrl+Tab / Ctrl+Shift+Tab) ---
+    function cycleSession(dir = 1) {
+      const all = [];
+      for (const [, set] of gameWindows.entries()) {
+        for (const w of set) {
+          if (w && !w.isDestroyed()) all.push(w);
+        }
+      }
+      if (all.length < 2) return;
+
+      const focused = BrowserWindow.getFocusedWindow();
+
+      if (!focused || focused === launcherWin) return;
+
+      const idx = all.findIndex(w => w === focused);
+      if (idx === -1) return;
+
+      let nextIdx = (idx + dir + all.length) % all.length;
+      const nextWin = all[nextIdx];
+      if (nextWin && !nextWin.isDestroyed()) {
+        try {
+          nextWin.show();
+          nextWin.focus();
+        } catch (e) {
+          console.error('Focus failed:', e);
+        }
+      }
+    }
+
+    globalShortcut.register('Control+Tab', () => cycleSession(1));
+    globalShortcut.register('Control+Shift+Tab', () => cycleSession(-1));
   }
 }
 
@@ -348,23 +411,19 @@ function dirBasesFromPartition(partition) {
   const base = String(partition || '').replace(/^persist:/, ''); // e.g. profile-Test_Copy
   const bases = new Set([base]);
 
-  // Try decode -> encode roundtrip
   let decoded = base;
   try { decoded = decodeURIComponent(base); } catch {}
   const encoded = encodeURIComponent(decoded);
   bases.add(decoded);
   bases.add(encoded);
 
-  // Underscore-sanitized from decoded human form
   const underscored = decoded.replace(/[^a-z0-9-_ ]/gi, '_');
   bases.add(underscored);
 
-  // Ensure prefix "profile-" remains; if not, add prefixed versions
   for (const b of Array.from(bases)) {
     if (!/^profile-/.test(b)) bases.add(`profile-${b}`);
   }
 
-  // Add optional trailing underscore variants
   for (const b of Array.from(bases)) {
     if (!b.endsWith('_')) bases.add(b + '_');
   }
@@ -421,7 +480,6 @@ async function safeRemovePartitionDirByPath(dir) {
     await tryRmDirRecursive(dir);
     return true;
   } catch (e) {
-    // Attempt rename to Trash and delete there
     try {
       await fs.promises.mkdir(TRASH_DIR, { recursive: true }).catch(() => {});
       const base = path.basename(dir);
@@ -444,11 +502,9 @@ async function safeRemovePartitionDirByPath(dir) {
 }
 
 async function safeRemovePartitionDir(partition, profileObjForLegacySweep) {
-  // Primary from explicit partition
   const primary = getPartitionDir(partition);
   let ok = await safeRemovePartitionDirByPath(primary);
 
-  // STRICT legacy dirs for current display name (sanitized/encoded/raw)
   if (profileObjForLegacySweep) {
     const legacyDirs = getLegacyPartitionDirsForProfile(profileObjForLegacySweep);
     for (const dir of legacyDirs) {
@@ -463,13 +519,12 @@ async function safeRemovePartitionDir(partition, profileObjForLegacySweep) {
     }
   }
 
-  // Partition-derived variants (covers renames where partition stayed on an old naming scheme)
   try {
     const partsRoot = path.join(USER_DATA, 'Partitions');
     const candidates = dirBasesFromPartition(partition);
     for (const base of candidates) {
       const full = path.join(partsRoot, base);
-      if (full === primary) continue; // already handled
+      if (full === primary) continue;
       try {
         const st = await fs.promises.stat(full);
         if (st && st.isDirectory()) {
@@ -526,7 +581,6 @@ function httpGetJson(url, headers = {}) {
   });
 }
 
-// Simple text fetch (HTML)
 function httpGetText(url, headers = {}) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, {
@@ -563,7 +617,6 @@ function compareSemver(a, b) {
 async function fetchLatestReleaseTag() {
   const { status, json } = await httpGetJson('https://api.github.com/repos/toffeegg/FlyffU-Launcher/releases/latest');
   if (status !== 200) throw new Error('GitHub API error: ' + status);
-  // Prefer tag_name; fallback to name
   return normalizeVersion(json.tag_name || json.name || '');
 }
 
@@ -579,7 +632,6 @@ async function captureScreenshotOfFocusedSession() {
   try {
     let target = BrowserWindow.getFocusedWindow();
 
-    // Verify it's one of the game windows; else pick a fallback
     let isGame = false;
     if (target) {
       for (const [, set] of gameWindows.entries()) {
@@ -588,8 +640,6 @@ async function captureScreenshotOfFocusedSession() {
     }
 
     if (!isGame) {
-      // NOTE: This "last of iteration" fallback is OK but not guaranteed to be "last used".
-      // Prefer a tracked `lastActiveGameWin` if you have one.
       const all = [];
       for (const [, set] of gameWindows.entries()) {
         for (const w of set) all.push(w);
@@ -601,7 +651,6 @@ async function captureScreenshotOfFocusedSession() {
 
     const image = await target.capturePage();
     if (!image || image.isEmpty?.()) {
-      // Optional: tell both windows it failed
       try { await showToastInWindow?.(target, 'Screenshot failed (empty image).'); } catch {}
       if (launcherWin && !launcherWin.isDestroyed()) {
         launcherWin.webContents.send('shots:done', { error: 'empty_image' });
@@ -609,7 +658,6 @@ async function captureScreenshotOfFocusedSession() {
       return;
     }
 
-    // Ensure output directory exists (async, non-blocking)
     try { await fs.promises.mkdir(SHOTS_DIR, { recursive: true }); } catch {}
 
     const ts = new Date();
@@ -617,14 +665,11 @@ async function captureScreenshotOfFocusedSession() {
     const filename = `FlyffU_${ts.getFullYear()}-${pad(ts.getMonth()+1)}-${pad(ts.getDate())}_${pad(ts.getHours())}-${pad(ts.getMinutes())}-${pad(ts.getSeconds())}.png`;
     const out = path.join(SHOTS_DIR, filename);
 
-    // Write asynchronously
     const pngBuffer = image.toPNG();
     await fs.promises.writeFile(out, pngBuffer);
 
-    // Toast inside the session window (best-effort)
     try { await showToastInWindow?.(target, 'Screenshot saved.'); } catch {}
 
-    // Notify launcher window
     if (launcherWin && !launcherWin.isDestroyed()) {
       launcherWin.webContents.send('shots:done', { file: out });
     }
@@ -632,14 +677,12 @@ async function captureScreenshotOfFocusedSession() {
     return out;
   } catch (e) {
     console.error('Screenshot failed:', e);
-    // Optional: launcher toast on error
     if (launcherWin && !launcherWin.isDestroyed()) {
       launcherWin.webContents.send('shots:done', { error: String(e && e.message || e) });
     }
   }
 }
 
-// Inject a toast into a BrowserWindow's webContents (session window)
 async function showToastInWindow(win, message = 'Screenshot saved.') {
   if (!win || win.isDestroyed()) return;
   const js = `
@@ -716,8 +759,8 @@ function createLauncher() {
 
   launcherWin.on('close', (e) => {
     if (quittingApp) return;
-	const focused = BrowserWindow.getFocusedWindow();
-	if (focused && focused !== launcherWin) return;
+    const focused = BrowserWindow.getFocusedWindow();
+    if (focused && focused !== launcherWin) return;
 
     if (getActiveProfileNames().length > 0) {
       e.preventDefault();
@@ -742,7 +785,6 @@ function createLauncher() {
     html,body{height:100%}
     body{margin:0;background:var(--bg);color:var(--text);display:flex;flex-direction:column}
 
-    /* Menu bar */
     .top{
       display:flex;align-items:center;gap:8px;
       padding:2px 8px 2px 8px;border-bottom:1px solid var(--line);
@@ -755,7 +797,7 @@ function createLauncher() {
       position:absolute;
       background:#0f1624;
       padding:6px;
-      min-width:150px;
+      min-width:180px;
       display:flex;
       flex-direction:column;
       gap:2px;
@@ -837,118 +879,42 @@ function createLauncher() {
       padding:0 12px 0 3px
     }
 
-    /* 2-column layout below .top */
     .content{
       width:min(1000px, 100vw);
       display:grid;
-      grid-template-columns: 7fr 3fr; /* 70% / 30% */
+      grid-template-columns: 7fr 3fr;
       gap:12px;
       height:94svh;
     }
 
-    .card {
-      display:flex;
-      flex-direction:column;
-      border-radius:0;
-      background:transparent;
-      min-height:0;
-    }
-    .card-h {
-      flex: 0 0 auto;
-      padding: 1px 0px 10px 0px;
-      border-bottom: 1px solid var(--line);
-      display: flex;
-      align-items: center;
-      gap:8px
-    }
-    .card-h #count {
-      margin-left: auto;
-    }
-    .card-c{
-      flex:1;display:flex;flex-direction:column;padding:1px 12px;min-height:0;
-    }
+    .card { display:flex; flex-direction:column; border-radius:0; background:transparent; min-height:0; }
+    .card-h { flex:0 0 auto; padding:1px 0px 10px 0px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:8px }
+    .card-h #count { margin-left:auto; }
+    .card-c{ flex:1; display:flex; flex-direction:column; padding:1px 12px; min-height:0; }
 
-    /* Right column (news) */
-    .news{
-      border:1px solid var(--line);
-	  margin-top:10px;
-	  margin-left:-10px;
-      background:var(--panel-2);
-      border-radius:10px;
-      display:flex;flex-direction:column;
-      min-height:0;
-      overflow:hidden;
-    }
-    .news-h{
-      padding:10px 12px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px;flex:0 0 auto
-    }
+    .news{ border:1px solid var(--line); margin-top:10px; margin-left:-10px; background:var(--panel-2); border-radius:10px; display:flex; flex-direction:column; min-height:0; overflow:hidden; }
+    .news-h{ padding:10px 12px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px;flex:0 0 auto }
     .news-title{font-size:14px;font-weight:600}
-    .news-c{
-      padding:10px 12px;
-      display:flex;flex-direction:column;gap:8px;
-      flex:1 1 auto;
-	  min-height:0;
-      overflow:auto;
-    }
+    .news-c{ padding:10px 12px; display:flex; flex-direction:column; gap:8px; flex:1 1 auto; min-height:0; overflow:auto; }
 	.news-c::-webkit-scrollbar{width:8px}
     .news-c::-webkit-scrollbar-thumb{background:#1f2633;border-radius:8px}
     .news-c::-webkit-scrollbar-track{background:transparent}
-    .news-item{
-      padding:9px 10px;border:1px solid #1e2a3e;border-radius:8px;background:#0f1624
-    }
+    .news-item{ padding:9px 10px;border:1px solid #1e2a3e;border-radius:8px;background:#0f1624 }
     .news-item a{color:#8fbaff;text-decoration:none}
     .news-item a:hover{text-decoration:underline}
     .news-item .nt{font-size:13px;font-weight:600;color:#d6e6ff}
     .news-item .ns{font-size:11px;color:#9aa7bd;margin-top:2px}
-	.news-item:hover {
-    background: var(--panel-5);
-    }
-    .news-empty{
-      padding:18px;border:1px dashed #263146;border-radius:8px;
-      text-align:center;font-size:13px;color:var(--sub)
-    }
+	.news-item:hover { background: var(--panel-5); }
+    .news-empty{ padding:18px;border:1px dashed #263146;border-radius:8px; text-align:center;font-size:13px;color:var(--sub) }
 
-    .btn {
-      border: none;
-      padding: 8px 14px;
-      margin: 2px 0;
-      border-radius: 6px;
-      background: #1b2334;
-      color: #fff;
-      cursor: pointer;
-      font-size: 13px;
-      font-weight: 500;
-      letter-spacing: .3px;
-      transition: transform .1s ease, filter .2s ease, background .2s ease;
-    }
-
+    .btn { border:none; padding:8px 14px; margin:2px 0; border-radius:6px; background:#1b2334; color:#fff; cursor:pointer; font-size:13px; font-weight:500; letter-spacing:.3px; transition: transform .1s ease, filter .2s ease, background .2s ease; }
     .btn:hover { filter: brightness(1.15); }
     .btn:active { transform: scale(.97); }
-
-    .btn.primary {
-      background: linear-gradient(135deg, #2c8ae8, #1f6fc2);
-      color: #fff;
-      box-shadow: 0 2px 6px rgba(44, 138, 232, 0.35);
-    }
-   .btn.primary:hover {
-      filter: brightness(1.15);
-      box-shadow: 0 3px 8px rgba(44, 138, 232, 0.45);
-    }
-
-    .btn.primary:active {
-      transform: scale(.97);
-      box-shadow: 0 1px 4px rgba(44, 138, 232, 0.25);
-    }
-
-    .btn.danger {
-      background: linear-gradient(135deg, #c62828, #a91d1d);
-      color: #fff;
-    }
-
-    .btn[disabled] {
-      opacity: .5;
-      cursor: not-allowed;
-    }
+    .btn.primary { background: linear-gradient(135deg, #2c8ae8, #1f6fc2); color:#fff; box-shadow:0 2px 6px rgba(44, 138, 232, 0.35); }
+    .btn.primary:hover { filter: brightness(1.15); box-shadow:0 3px 8px rgba(44, 138, 232, 0.45); }
+    .btn.primary:active { transform: scale(.97); box-shadow:0 1px 4px rgba(44, 138, 232, 0.25); }
+    .btn.danger { background: linear-gradient(135deg, #c62828, #a91d1d); color:#fff; }
+    .btn[disabled] { opacity:.5; cursor:not-allowed; }
 
     input[type="text"], select {
       width: 100%;
@@ -967,134 +933,40 @@ function createLauncher() {
       outline: none;
     }
 
-    /* LEFT column list */
-    .list{
-      flex:1 1 auto;min-height:0;
-      display:flex;flex-direction:column;gap:8px;overflow:auto;margin-top:8px;
-      scroll-behavior:smooth;
-      padding-right:8px;
-	  margin-right: 0;
-    }
-
-    .row{
-      border:1px solid var(--line);background:var(--panel-2);
-      border-radius:8px;padding:10px
-    }
-	.row:hover {
-    background: var(--panel-5);
-    }
-	.row:hover .name {
-    color: #2c8ae8;
-    }
-    .row-top{
-	display:flex;
-	align-items:center;
-	justify-content:space-between;
-	gap:8px
-    }
-    .name {
-      font-weight: 600;
-      font-size: 15px;
-      color: #e6efff;
-      margin-top: 3px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      letter-spacing: 0.2px;
-      transition: color .2s ease;
-    }
-
+    .list{ flex:1 1 auto; min-height:0; display:flex; flex-direction:column; gap:8px; overflow:auto; margin-top:8px; scroll-behavior:smooth; padding-right:8px; margin-right:0; }
+    .row{ border:1px solid var(--line); background:var(--panel-2); border-radius:8px; padding:10px }
+	.row:hover { background: var(--panel-5); }
+	.row:hover .name { color: #2c8ae8; }
+    .row-top{ display:flex; align-items:center; justify-content:space-between; gap:8px }
+    .name { font-weight:600; font-size:15px; color:#e6efff; margin-top:3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; letter-spacing:.2px; transition: color .2s ease; }
     .row-actions{display:flex;gap:6px}
-
     .manage{margin-top:8px;border-top:1px dashed var(--line);padding-top:8px;display:none}
     .manage.show{display:block}
-
     .grid{display:grid;gap:8px}
     .grid.cols-2{grid-template-columns:1fr 1fr}
     .grid.cols-2 > .btn{width:100%}
-
-    .empty{
-      padding:18px;border:1px dashed #263146;border-radius:8px;
-      text-align:center;margin-top:8px;font-size:13px;color:var(--sub)
-    }
-
+    .empty{ padding:18px;border:1px dashed #263146;border-radius:8px; text-align:center;margin-top:8px;font-size:13px;color:var(--sub) }
     .create-form{margin-top:8px;display:none}
     .create-form.show{display:block}
-
     .sec-title{font-size:11px;color:var(--sub);margin:6px 0 2px}
-    .tag {
-      display: inline-block;
-      background: rgba(44, 138, 232, 0.08);
-      border: 1px solid rgba(44, 138, 232, 0.35);
-      border-radius: 999px;
-      padding: 3px 8px;
-      font-size: 11px;
-      font-weight: 500;
-      color: #9fb5d9;
-      margin-left: 6px;
-      line-height: 1.3;
-    }
-    .toasts{
-      position:fixed;right:12px;bottom:12px;display:flex;flex-direction:column;
-      gap:8px;z-index:9999
-    }
-    .toast {
-      background: #0f1624;
-      border: 1px solid #1e2a3e;
-      border-left: 3px solid #2c8ae8;
-      padding: 10px 14px;
-      border-radius: 8px;
-      min-width: 220px;
-      box-shadow: 0 8px 20px rgba(0,0,0,.35);
-      opacity: 0;
-      transform: translateY(6px);
-      transition: opacity .25s ease, transform .25s ease;
-    }
-
-    .toast.show {
-      opacity: 1;
-      transform: translateY(0);
-    }
-
-    .toast .tmsg {
-      font-size: 13px;
-      font-weight: 500;
-      color: #d6e6ff;
-      letter-spacing: 0.2px;
-    }
-
+    .tag { display:inline-block; background: rgba(44, 138, 232, 0.08); border: 1px solid rgba(44, 138, 232, 0.35); border-radius:999px; padding:3px 8px; font-size:11px; font-weight:500; color:#9fb5d9; margin-left:6px; line-height:1.3; }
+    .toasts{ position:fixed;right:12px;bottom:12px;display:flex;flex-direction:column; gap:8px; z-index:9999 }
+    .toast { background:#0f1624; border:1px solid #1e2a3e; border-left:3px solid #2c8ae8; padding:10px 14px; border-radius:8px; min-width:220px; box-shadow:0 8px 20px rgba(0,0,0,.35); opacity:0; transform: translateY(6px); transition: opacity .25s ease, transform .25s ease; }
+    .toast.show { opacity:1; transform: translateY(0); }
+    .toast .tmsg { font-size:13px; font-weight:500; color:#d6e6ff; letter-spacing:.2px; }
     .drag-handle{cursor:grab;user-select:none;margin-right:6px;font-size:13px;color:#9aa7bd}
     .row.dragging{opacity:.6}
     .drop-indicator{height:6px;border-radius:6px;background:#233046;margin:6px 0;display:none}
     .drop-indicator.show{display:block}
 
-    @media (max-width:880px){
-      .content{grid-template-columns:1fr} /* Stack on small widths */
-    }
-
-    /* Show scrollbar only on profile list */
+    @media (max-width:880px){ .content{grid-template-columns:1fr} }
     .list::-webkit-scrollbar{width:8px}
     .list::-webkit-scrollbar-thumb{background:#1f2633;border-radius:8px}
     .list::-webkit-scrollbar-track{background:transparent}
 
-    .tips {
-      border: 1px solid var(--line);
-      background: var(--panel-2);
-      border-radius: 8px;
-      padding: 10px;
-      margin-top: 12px;
-      font-size: 13px;
-      color: var(--sub);
-    }
-    .tips-title {
-      font-weight: 600;
-      color: var(--text);
-      margin-bottom: 6px;
-    }
-    .tips-content {
-      margin-bottom: 8px;
-      line-height: 1.4;
-    }
+    .tips { border:1px solid var(--line); background:var(--panel-2); border-radius:8px; padding:10px; margin-top:12px; font-size:13px; color:var(--sub); }
+    .tips-title { font-weight:600; color:var(--text); margin-bottom:6px; }
+    .tips-content { margin-bottom:8px; line-height:1.4; }
 
   </style>
 
@@ -1112,6 +984,8 @@ function createLauncher() {
           <button class="menu-btn" id="optExport">Export profiles.json</button>
           <div class="menu-sep"></div>
           <button class="menu-btn" id="optScreenshots">Open Screenshots folder</button>
+          <div class="menu-sep"></div>
+          <button class="menu-btn" id="optStayOpen">Stay Open After Launch</button>
         </div>
 
         <!-- Tools dropdown -->
@@ -1125,7 +999,7 @@ function createLauncher() {
       </div>
 
       <div class="update-wrap" style="margin-left:auto">
-	  <button id="updateBtn" class="btn sm gold" style="display:none"></button>
+	    <button id="updateBtn" class="btn sm gold" style="display:none"></button>
         <div class="muted" id="versionLink">
           <a href="#" onclick="require('electron').shell.openExternal('https://github.com/toffeegg/FlyffU-Launcher/releases')" style="color:inherit;text-decoration:none;">
             Version ${pkg.version}
@@ -1194,7 +1068,8 @@ function createLauncher() {
       let filterText = '';
       let jobFilter = 'all';
       let draggingName = null;
-      let audioStates = {}; // { [profileName]: boolean }
+      let audioStates = {};
+      let stayOpenAfterLaunch = false;
 
       const toastsEl = document.getElementById('toasts');
       function showToast(msg) {
@@ -1223,7 +1098,6 @@ function createLauncher() {
         return ipcRenderer.invoke('ui:shortcuts');
       }
 
-      // ----- Menu logic (click to enter "menu mode", hover to switch, click outside to close) -----
       const menuOptions = document.getElementById('menuOptions');
       const menuTools = document.getElementById('menuTools');
       const menuHelp = document.getElementById('menuHelp');
@@ -1289,7 +1163,6 @@ function createLauncher() {
         }
       }
 
-      // Outside click closes and exits menu mode
       document.addEventListener('click', (e) => {
         const withinMenu = e.target.closest('.menu-item') || e.target.closest('.menu-dropdown');
         if (!withinMenu) {
@@ -1298,13 +1171,10 @@ function createLauncher() {
         }
       });
 	  
-	  // If the window loses focus (user clicks another app / desktop), close menus.
-      window.addEventListener('blur', () => {
+	  window.addEventListener('blur', () => {
         closeAllMenus();
         menuMode = false;
       });
-      
-      // Also when the page becomes hidden (minimize, switch space), close menus.
       document.addEventListener('visibilitychange', () => {
         if (document.hidden) {
           closeAllMenus();
@@ -1312,7 +1182,6 @@ function createLauncher() {
         }
       });
 
-      // Click to toggle "menu mode" for each menu with a dropdown
       menuOptions.addEventListener('click', () => {
         if (menuMode && activeMenu === 'options') {
           closeAllMenus();
@@ -1343,12 +1212,10 @@ function createLauncher() {
         }
       });
 
-      // Hover-to-switch only when menuMode is active
       menuOptions.addEventListener('mouseenter', () => { if (menuMode) openMenu('options'); });
       menuTools.addEventListener('mouseenter', () => { if (menuMode) openMenu('tools'); });
       menuHelp.addEventListener('mouseenter', () => { if (menuMode) openMenu('help'); });
 
-      // Help dropdown actions
       document.getElementById('helpAbout').onclick = async () => {
         closeAllMenus();
         menuMode = false;
@@ -1360,7 +1227,6 @@ function createLauncher() {
         await showShortcutsDialog();
       };
 
-      // Options actions
       document.getElementById('optImport').onclick = async () => {
         closeAllMenus();
         menuMode = false;
@@ -1385,7 +1251,37 @@ function createLauncher() {
         await ipcRenderer.invoke('shots:open-folder');
       };
 
-      // ----- Update check -----
+      const optStayOpen = document.getElementById('optStayOpen');
+      function updateStayOpenLabel() {
+        if (optStayOpen) {
+          optStayOpen.textContent = stayOpenAfterLaunch
+            ? 'Hide Launcher After Launch'
+            : 'Stay Open After Launch';
+        }
+      }
+      (async () => {
+        try {
+          const s = await ipcRenderer.invoke('settings:get');
+          stayOpenAfterLaunch = !!(s && s.stayOpenAfterLaunch);
+        } catch { stayOpenAfterLaunch = false; }
+        updateStayOpenLabel();
+      })();
+
+      optStayOpen.onclick = async() => {
+          stayOpenAfterLaunch = !stayOpenAfterLaunch;
+          updateStayOpenLabel();
+          await ipcRenderer.invoke('settings:update', {
+              stayOpenAfterLaunch
+          });
+          showToast(
+              stayOpenAfterLaunch ?
+              'Launcher will stay open after launching.' :
+              'Launcher will hide after launching.'
+          );
+          closeAllMenus();
+          menuMode = false;
+      };
+
       const updateBtn = document.getElementById('updateBtn');
       (async() => {
           try {
@@ -1399,7 +1295,6 @@ function createLauncher() {
           } catch {}
       })();
 
-      // ----- Create / Search / Filters -----
       const createBtn = document.getElementById('createBtn');
       const createForm = document.getElementById('createForm');
       const createName = document.getElementById('createName');
@@ -1410,7 +1305,6 @@ function createLauncher() {
       const searchInput = document.getElementById('searchInput');
       const jobFilterEl = document.getElementById('jobFilter');
 
-      // Close expanded profile when toggling Create Profile; also reset job selector
       createBtn.onclick = () => { 
         manageOpen = null;
         document.querySelectorAll('.manage.show').forEach(el => el.classList.remove('show'));
@@ -1428,7 +1322,6 @@ function createLauncher() {
         if (createJob && createJob.options && createJob.options.length) createJob.selectedIndex = 0;
       };
 
-      // Close expanded profile AND collapse create form when typing in Search
       searchInput.addEventListener('input', () => {
         filterText = (searchInput.value || '').trim().toLowerCase();
         if (manageOpen !== null) manageOpen = null;
@@ -1436,7 +1329,6 @@ function createLauncher() {
         render();
       });
 
-      // Close expanded profile AND collapse create form when changing Job filter
       jobFilterEl.addEventListener('change', () => {
         jobFilter = (jobFilterEl.value || 'all').trim();
         if (manageOpen !== null) manageOpen = null;
@@ -1461,10 +1353,9 @@ function createLauncher() {
           createName.focus();
           return;
         }
-        // Reset inputs after successful create
         createName.value = '';
         if (createJob && createJob.options && createJob.options.length) {
-          createJob.selectedIndex = 0; // reset job selector to first option
+          createJob.selectedIndex = 0;
         }
         createForm.classList.remove('show');
         await refresh();
@@ -1504,7 +1395,7 @@ function createLauncher() {
       async function queryAudioState(name){
         try{
           const res = await ipcRenderer.invoke('profiles:audio-state', name);
-          if (res && res.ok) audioStates[name] = !!res.muted;
+        if (res && res.ok) audioStates[name] = !!res.muted;
         }catch{}
       }
 
@@ -1526,10 +1417,8 @@ function createLauncher() {
             draggingName = name;
             row.classList.add('dragging');
             e.dataTransfer.setData('text/plain', name);
-            // Collapse any open manage panel without disrupting drag
             manageOpen = null;
             document.querySelectorAll('.manage.show').forEach(el => el.classList.remove('show'));
-            // Make sure any "Close" label goes back to "Manage"
             document.querySelectorAll('.manage-btn').forEach(btn => { btn.textContent = 'Manage'; });
           });
           row.addEventListener('dragend', () => {
@@ -1620,7 +1509,6 @@ function createLauncher() {
             manage.disabled = true;
           } else {
             manage.onclick = () => {
-              // Collapse create form when clicking Manage
               createForm.classList.remove('show');
               manageOpen = (manageOpen === name) ? null : name;
               render();
@@ -1641,16 +1529,17 @@ function createLauncher() {
           const play = document.createElement('button');
           play.className = 'btn primary';
           if (isActive(name)) {
-            play.textContent = 'Playing';
-            play.disabled = true;
+            play.textContent = 'Show';
+            play.onclick = async () => {
+              await ipcRenderer.invoke('profiles:focus', name);
+            };
           } else {
             play.textContent = 'Play';
             play.onclick = async () => {
-              // Collapse manage + create form when clicking Play
               manageOpen = null;
               createForm.classList.remove('show');
               render();
-              await ipcRenderer.invoke('profiles:launch', name);
+              await ipcRenderer.invoke('profiles:launch', { name });
             };
           }
           actions.appendChild(play);
@@ -1706,7 +1595,6 @@ function createLauncher() {
           m.appendChild(renameWrap);
           m.appendChild(saveRow);
 
-          // Controls row
           const authRow = document.createElement('div');
           authRow.className = 'grid cols-2';
 
@@ -1792,7 +1680,6 @@ function createLauncher() {
           row.appendChild(m);
           listEl.appendChild(row);
 
-          // Preload audio state for active sessions
           if (isActive(name)) { queryAudioState(name); }
         });
       }
@@ -1821,24 +1708,24 @@ function createLauncher() {
 
       refresh();
 
-      // ---------- Tips dialog ----------
-	  
+      // ---------- Tips ----------
       const tips = [
-        "Use Ctrl+Shift+L to show or hide the launcher while playing.",
-        "Import or export profiles via Options → Import/Export.",
+        "Press Ctrl+Shift+L while playing to show or hide the launcher and open another profile.",
+        "Easily import or export your profile list and settings from Options → Import/Export Profiles.json.",
         "Press Ctrl+Shift+P to capture a screenshot of the focused session.",
         "Access your screenshots from Options → Open Screenshots folder.",
-        "Use Ctrl+Shift+M to mute or unmute your current session.",
-        "Drag and reorder your profiles — the order is saved automatically.",
+        "Press Ctrl+Shift+M to mute or unmute your current session.",
+        "Drag and reorder your profiles and the order saves automatically.",
         "Filter profiles quickly by typing in the search bar.",
         "Use the job dropdown to filter characters by their class.",
         "Clone an existing profile to copy its settings instantly.",
-        "Enable or disable a window frame per profile in Manage settings.",
+        "Want a wider view? Toggle the window frame for each profile by clicking the Manage button.",
         "Reset saved window size or position from the Manage panel if needed.",
-        "Rename a profile by right-clicking it in the list.",
         "Clear profile data (cookies, cache, storage) safely from Manage.",
-        "Quit a running session directly from the launcher with one click.",
-        "Check for updates — a gold button will appear when a new version is available."
+        "A gold button appears when a new version is available.",
+        "Press Ctrl+Tab or Ctrl+Shift+Tab to cycle between active sessions.",
+        "To switch to a specific active session, press Ctrl+Shift+L and click 'Show'.",
+        "Prefer to keep the launcher visible after pressing Play? Toggle it in Options → Stay Open After Launch."
       ];
 
       function shuffle(array) {
@@ -1862,7 +1749,7 @@ function createLauncher() {
           tipsContent.textContent = shuffledTips[tipIndex];
           tipIndex = (tipIndex + 1) % shuffledTips.length;
           if (tipIndex === 0) {
-            shuffledTips = shuffle([...tips]); // reshuffle after each cycle
+            shuffledTips = shuffle([...tips]);
           }
         }
       
@@ -1877,15 +1764,18 @@ function createLauncher() {
           intervalId = null;
         }
       
-        // Initial tip
         showTip();
         startRotation();
       
-        // Pause/resume on hover
         tipsBox.addEventListener("mouseenter", stopRotation);
         tipsBox.addEventListener("mouseleave", startRotation);
+        tipsBox.addEventListener("click", () => {
+          stopRotation();
+          showTip();
+          startRotation();
+        });
       }
-      
+
       window.addEventListener("DOMContentLoaded", initTips);
 
       // ---------- News (right column) ----------
@@ -1918,10 +1808,9 @@ function createLauncher() {
 
       (async () => {
         try{
-          const html = await ipcRenderer.invoke('news:get'); // load once on launcher open
+          const html = await ipcRenderer.invoke('news:get');
           const doc = new (window.DOMParser)().parseFromString(html, 'text/html');
 
-          // Collect from all three tabs if present
           function collect(selector, sectionLabel){
             const anchors = doc.querySelectorAll(selector);
             const arr = [];
@@ -1958,7 +1847,6 @@ function createLauncher() {
 // ---------- Launch Game (with window state restore/save) ----------
 
 function applyWinStateOptionsFromProfile(profile) {
-  // Default: maximize when no saved state exists
   const ws = sanitizeWinState(profile.winState);
   const opts = {};
   let postCreate = (win) => { try { win.maximize(); } catch {} };
@@ -2014,7 +1902,6 @@ function saveWindowStateForProfile(profileName, win) {
 function exitAppNow() {
   try {
     quittingApp = true;
-    // force-close all windows without prompts
     for (const w of BrowserWindow.getAllWindows()) {
       try { w.__confirmedClose = true; } catch {}
       try { if (!w.isDestroyed()) w.close(); } catch {}
@@ -2054,52 +1941,67 @@ function launchGameWithProfile(name) {
     try { win.webContents.setAudioMuted(true); } catch {}
   }
 
-  win.on('close', async (e) => {
+  win.on('close', async(e) => {
     if (win.__confirmedClose) {
-      // save window state before final close
-      saveWindowStateForProfile(name, win);
-      return;
+        saveWindowStateForProfile(name, win);
+        return;
     }
+
+    if (win.__closingPrompt) {
+        e.preventDefault();
+        return;
+    }
+
     e.preventDefault();
+    win.__closingPrompt = true;
+
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+
     const res = await dialog.showMessageBox(win, {
-      type: 'question',
-      buttons: ['Exit Session', 'Exit FlyffU Launcher', 'Cancel'],
-      defaultId: 0,
-      cancelId: 2,
-      title: 'Exit Session',
-      message: 'Exit this game session?',
-      detail: 'Profile: ' + (win.__profileName || name),
-      noLink: true,
-      normalizeAccessKeys: true
-    });
-    if (res.response === 0) {
-      // Exit Session
-      saveWindowStateForProfile(name, win);
-      win.__confirmedClose = true;
-      win.close();
-    } else if (res.response === 1) {
-    // Exit FlyffU Launcher
-    saveWindowStateForProfile(name, win);
-    
-    if (getActiveProfileNames().length > 1) {
-      const confirm = await dialog.showMessageBox(win, {
-        type: 'warning',
-        buttons: ['Yes, Exit All', 'Cancel'],
+        type: 'question',
+        buttons: ['Exit Session', 'Exit FlyffU Launcher', 'Cancel'],
         defaultId: 0,
-        cancelId: 1,
-        title: 'Confirm Exit',
-        message: 'Multiple sessions are still running.',
-        detail: 'Are you sure you want to close FlyffU Launcher and all running profiles?',
+        cancelId: 2,
+        title: 'Exit Session',
+        message: 'Exit this game session?',
+        detail: 'Profile: ' + (win.__profileName || name),
         noLink: true,
         normalizeAccessKeys: true
-      });
-      if (confirm.response !== 0) return; // user cancelled
+    });
+
+    if (res.response === 0) {
+        saveWindowStateForProfile(name, win);
+        win.__confirmedClose = true;
+        win.close();
+        return;
+    } else if (res.response === 1) {
+        saveWindowStateForProfile(name, win);
+        if (getActiveProfileNames().length > 1) {
+            const confirm = await dialog.showMessageBox(win, {
+                type: 'warning',
+                buttons: ['Yes, Exit All', 'Cancel'],
+                defaultId: 0,
+                cancelId: 1,
+                title: 'Confirm Exit',
+                message: 'Multiple sessions are still running.',
+                detail: 'Are you sure you want to close FlyffU Launcher and all running profiles?',
+                noLink: true,
+                normalizeAccessKeys: true
+            });
+            if (confirm.response !== 0) {
+                win.__closingPrompt = false;
+                return;
+            }
+        }
+        exitAppNow();
+        return;
     }
-    exitAppNow();
-    }
+
+    win.__closingPrompt = false;
   });
 
-  // Also save on maximization changes / move / resize (lightweight)
   const debouncedSave = debounce(() => saveWindowStateForProfile(name, win), 300);
   win.on('resize', debouncedSave);
   win.on('move', debouncedSave);
@@ -2143,7 +2045,6 @@ function launchGameWithProfile(name) {
     }
   });
 
-  // Apply post-create (maximize) if needed
   try { postCreate(win); } catch {}
 
   win.loadURL(url);
@@ -2205,6 +2106,16 @@ async function cloneCookiesBetweenPartitions(srcPartition, dstPartition) {
 
 // ---------- IPC handlers ----------
 
+ipcMain.handle('settings:get', async () => {
+  return settings;
+});
+
+ipcMain.handle('settings:update', async (_e, patch) => {
+  settings = { ...settings, ...patch };
+  writeSettings(settings);
+  return { ok: true, settings };
+});
+
 ipcMain.handle('profiles:get', async () => {
   return readProfiles();
 });
@@ -2230,7 +2141,6 @@ ipcMain.handle('profiles:add', async (_e, payload) => {
   return { ok: true };
 });
 
-// Clone profile: use "Name Copy", "Name Copy 2", ...
 ipcMain.handle('profiles:clone', async (_e, { name }) => {
   const list = readProfiles();
   const src = list.find(p => p.name === name);
@@ -2314,7 +2224,6 @@ ipcMain.handle('profiles:update', async (_e, { from, to, frame, job }) => {
   list[idx].frame = (typeof frame === 'boolean') ? frame : !!list[idx].frame;
   list[idx].isClone = wasClone;
   list[idx].job = nextJob;
-  // Keep existing winState as-is
 
   writeProfiles(list);
 
@@ -2349,7 +2258,6 @@ ipcMain.handle('profiles:rename', async (_e, { from, to }) => {
   list[idx].name = newName;
   list[idx].partition = oldPartition;
   list[idx].isClone = wasClone;
-  // winState carried forward
 
   writeProfiles(list);
 
@@ -2358,7 +2266,6 @@ ipcMain.handle('profiles:rename', async (_e, { from, to }) => {
   return { ok: true };
 });
 
-// Reset saved window size/position
 ipcMain.handle('profiles:resetWinState', async (_e, name) => {
   const list = readProfiles();
   const idx = getProfileIndex(list, name);
@@ -2369,15 +2276,12 @@ ipcMain.handle('profiles:resetWinState', async (_e, name) => {
   return { ok: true };
 });
 
-// DELETE PROFILE with restart to complete full folder deletion
-// (STRICT by partition; also removes partition-derived folder name variants)
 ipcMain.handle('profiles:delete', async (_e, { name, clear }) => {
   const list = readProfiles();
   const p = list.find(x => x.name === name);
   if (!p) return { ok: false, error: 'Profile not found' };
   const part = partitionForProfile(p);
 
-  // Close any open windows for this profile (force-close without prompt)
   if (gameWindows.has(name)) {
     for (const w of gameWindows.get(name)) {
       try {
@@ -2388,13 +2292,11 @@ ipcMain.handle('profiles:delete', async (_e, { name, clear }) => {
     gameWindows.delete(name);
   }
 
-  // Remove from profiles.json
   const next = list.filter(x => x.name !== name);
   writeProfiles(next);
 
   let requiresRestart = false;
 
-  // If no other profile shares this partition, nuke its data and directories
   const remainingRefs = next.filter(x => (x.partition || partitionForProfile(x)) === part).length;
 
   if (clear && remainingRefs === 0) {
@@ -2419,7 +2321,6 @@ ipcMain.handle('profiles:delete', async (_e, { name, clear }) => {
       console.error('Failed clearing storage for', name, e);
     }
 
-    // Queue deletion for primary, strict legacy, and partition-derived variants
     const primaryDir = getPartitionDir(part);
     enqueuePendingDelete(primaryDir);
     const legacyDirs = getLegacyPartitionDirsForProfile(p);
@@ -2476,11 +2377,28 @@ ipcMain.handle('profiles:clear', async (_e, name) => {
   }
 });
 
-ipcMain.handle('profiles:launch', async (_e, name) => {
-  if (launcherWin && !launcherWin.isDestroyed()) {
-    launcherWin.hide();
-  }
+ipcMain.handle('profiles:launch', async (_e, payload) => {
+  const name = (typeof payload === 'string') ? payload : payload?.name;
+  const stayOpen = !!settings.stayOpenAfterLaunch;
+
   launchGameWithProfile(name);
+
+  if (launcherWin && !launcherWin.isDestroyed()) {
+    if (!stayOpen) {
+      try { launcherWin.hide(); } catch {}
+    } else {
+      if (launcherWin.isVisible() && !launcherWin.isMinimized()) {
+        setTimeout(() => {
+          try {
+            launcherWin.setAlwaysOnTop(true, 'screen-saver');
+            launcherWin.show();
+            launcherWin.focus();
+            setTimeout(() => { try { launcherWin.setAlwaysOnTop(false); } catch {} }, 300);
+          } catch {}
+        }, 120);
+      }
+    }
+  }
   return { ok: true };
 });
 
@@ -2493,7 +2411,23 @@ ipcMain.handle('profiles:quit', async (_e, name) => {
   return { ok: true };
 });
 
-// Audio state (mute/unmute)
+ipcMain.handle('profiles:focus', async (_e, name) => {
+  const wins = getAllGameWindowsForProfile(name);
+  if (!wins.length) return { ok: false, error: 'No session running' };
+
+  const target = wins[0];
+  if (target && !target.isDestroyed()) {
+    try {
+      target.show();
+      target.focus();
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  }
+  return { ok: false, error: 'Window destroyed' };
+});
+
 ipcMain.handle('profiles:audio-state', async (_e, name) => {
   const list = readProfiles();
   const idx = getProfileIndex(list, name);
@@ -2507,7 +2441,6 @@ ipcMain.handle('profiles:audio-state', async (_e, name) => {
   const anyUnmuted = wins.some(w => !w.webContents.isAudioMuted());
   const muted = !anyUnmuted;
 
-  // Sync to profile storage
   list[idx].muted = muted;
   writeProfiles(list);
 
@@ -2531,7 +2464,6 @@ ipcMain.handle('profiles:toggle-audio', async (_e, name) => {
     }
   }
 
-  // Save state to profile
   list[idx].muted = next;
   writeProfiles(list);
 
@@ -2542,7 +2474,6 @@ ipcMain.handle('profiles:toggle-audio', async (_e, name) => {
   return { ok: true, muted: next };
 });
 
-// Import/Export profiles.json
 ipcMain.handle('profiles:export', async () => {
   try {
     const { filePath, canceled } = await dialog.showSaveDialog({
@@ -2578,7 +2509,6 @@ ipcMain.handle('profiles:import', async () => {
   }
 });
 
-// Open screenshots folder
 ipcMain.handle('shots:open-folder', async () => {
   try {
     await shell.openPath(SHOTS_DIR);
@@ -2599,7 +2529,6 @@ ipcMain.handle('app:check-update', async () => {
   }
 });
 
-// Fetch news HTML once on demand
 ipcMain.handle('news:get', async () => {
   try {
     const html = await httpGetText('https://universe.flyff.com/news');
@@ -2609,7 +2538,6 @@ ipcMain.handle('news:get', async () => {
   }
 });
 
-// Tools drop-items
 ipcMain.handle('tools:list', async () => {
   return [
     { title: 'Flyffipedia', link: 'https://flyffipedia.com/' },
@@ -2683,7 +2611,6 @@ ipcMain.handle('ui:about', async () => {
       nodeIntegration: true,
       contextIsolation: false,
       backgroundThrottling: false,
-      // keep webSecurity true; we don't need file:// anymore
     },
   });
 
@@ -2767,8 +2694,8 @@ ipcMain.handle('ui:shortcuts', async () => {
   const win = new BrowserWindow({
     parent,
     modal: true,
-    width: 400,
-    height: 250,
+    width: 500,
+    height: 400,
     resizable: false,
     minimizable: false,
     maximizable: false,
@@ -2809,6 +2736,8 @@ ipcMain.handle('ui:shortcuts', async () => {
         <div class="item"><div class="label">Toggle Launcher</div><div class="kbd">Ctrl + Shift + L</div></div>
 		<div class="item"><div class="label">Mute/Unmute focused session</div><div class="kbd">Ctrl + Shift + M</div></div>
         <div class="item"><div class="label">Screenshot focused session</div><div class="kbd">Ctrl + Shift + P</div></div>
+		<div class="item"><div class="label">Cycle forward active sessions</div><div class="kbd">Ctrl + Tab</div></div>
+		<div class="item"><div class="label">Cycle backward active sessions</div><div class="kbd">Ctrl + Shift + Tab</div></div>
       </div>
     </div>
     <script>
@@ -2822,21 +2751,18 @@ ipcMain.handle('ui:shortcuts', async () => {
   return { ok: true };
 });
 
-
 // ---------- App lifecycle ----------
 
 app.on('ready', async () => {
   if (!fs.existsSync(PROFILES_FILE)) writeProfiles([]);
-  // Normalize and migrate partitions (detect strict legacy dirs) on startup
   writeProfiles(readProfiles());
+  settings = readSettings();
 
-  // Process any queued deletions BEFORE creating windows/sessions to avoid locks
   await processPendingDeletes().catch(() => {});
 
   createLauncher();
   updateGlobalShortcut();
 
-  // Optional notify renderer
   if (launcherWin && !launcherWin.isDestroyed()) {
     launcherWin.webContents.send('app:restarted-cleanup-complete');
   }
