@@ -10,6 +10,10 @@ on: push
 permissions:
   contents: write
 
+env:
+    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    GH_TOKEN: ${{ secrets.GH_TOKEN }}
+
 jobs:
   build:
     name: Build Electron App
@@ -38,8 +42,5 @@ jobs:
       run: npm run dist:win && npm run dist:mac
 
     - name: Build distributable
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        GH_TOKEN: ${{ secrets.GH_TOKEN }}
       run: |
         npm run publish
