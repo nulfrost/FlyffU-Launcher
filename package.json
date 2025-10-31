@@ -11,6 +11,10 @@
 		"dist:linux": "electron-builder --linux AppImage",
 		"dist:all": "npm run dist:win && npm run dist:mac && npm run dist:linux"
 	},
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/toffeegg/FlyffU-Launcher.git"
+	},
 	"build": {
 		"appId": "toffee.gg.flyffu",
 		"productName": "FlyffU Launcher",

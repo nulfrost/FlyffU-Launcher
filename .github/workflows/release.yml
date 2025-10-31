@@ -17,13 +17,10 @@ jobs:
         os: [macos-latest, windows-latest]
 
     steps:
-    - name: Debug GH_TOKEN
-      run: echo "GH_TOKEN is ${#GH_TOKEN} characters long"
-      env:
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
     - name: Checkout repository
       uses: actions/checkout@v4
+      with:
+          fetch-depth: 0
 
     - name: Use Node.js
       uses: actions/setup-node@v4
@@ -37,6 +34,6 @@ jobs:
       run: npm run dist:win && npm run dist:mac
 
     - name: Build distributable
-      run: npx electron-builder --${{ matrix.os == 'windows-latest' && 'win' || 'mac' }} --publish always
+      run: npx electron-builder --publish always
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
