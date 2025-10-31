@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build Electron App
@@ -31,4 +34,4 @@ jobs:
       - name: Build distributable
         run: npx electron-builder --${{ matrix.os == 'windows-latest' && 'win' || 'mac' }} --publish always
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+            GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
