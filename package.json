@@ -10,6 +10,7 @@
 		"dist:mac": "electron-builder --mac dmg",
 		"dist:linux": "electron-builder --linux AppImage",
 		"dist:all": "npm run dist:win && npm run dist:mac && npm run dist:linux",
+		"build": "electron-builder -mw",
 		"publish": "electron-builder --publish always"
 	},
 	"repository": {

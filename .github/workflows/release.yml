@@ -39,7 +39,7 @@ jobs:
       run: npm ci
 
     - name: Build app
-      run: npm run dist:win && npm run dist:mac
+      run: npm run build
 
     - name: Build distributable
       run: |
