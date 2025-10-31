@@ -17,23 +17,27 @@ jobs:
         os: [macos-latest, windows-latest]
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-          fetch-depth: 0
 
-    - name: Use Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: 20
+    - name: Debug Git remote
+      run: git remote -v
 
-    - name: Install dependencies
-      run: npm ci
+    # - name: Checkout repository
+    #   uses: actions/checkout@v4
+    #   with:
+    #       fetch-depth: 0
 
-    - name: Build app
-      run: npm run dist:win && npm run dist:mac
+    # - name: Use Node.js
+    #   uses: actions/setup-node@v4
+    #   with:
+    #     node-version: 20
 
-    - name: Build distributable
-      run: npx electron-builder --publish always
-      env:
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    # - name: Install dependencies
+    #   run: npm ci
+
+    # - name: Build app
+    #   run: npm run dist:win && npm run dist:mac
+
+    # - name: Build distributable
+    #   run: npx electron-builder --publish always
+    #   env:
+    #     GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
