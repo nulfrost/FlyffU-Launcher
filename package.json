@@ -9,7 +9,8 @@
 		"dist:win": "electron-builder --win nsis",
 		"dist:mac": "electron-builder --mac dmg",
 		"dist:linux": "electron-builder --linux AppImage",
-		"dist:all": "npm run dist:win && npm run dist:mac && npm run dist:linux"
+		"dist:all": "npm run dist:win && npm run dist:mac && npm run dist:linux",
+		"publish": "electron-builder --publish always"
 	},
 	"repository": {
 		"type": "git",

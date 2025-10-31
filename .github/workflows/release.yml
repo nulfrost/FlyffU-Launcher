@@ -24,22 +24,22 @@ jobs:
       uses: actions/checkout@v4
       with:
           fetch-depth: 0
-    
-    - name: Debug Git remote
-      run: git remote -v
 
-    # - name: Use Node.js
-    #   uses: actions/setup-node@v4
-    #   with:
-    #     node-version: 20
+    - name: Use Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20
+        cache: 'npm'
 
-    # - name: Install dependencies
-    #   run: npm ci
+    - name: Install dependencies
+      run: npm ci
 
-    # - name: Build app
-    #   run: npm run dist:win && npm run dist:mac
+    - name: Build app
+      run: npm run dist:win && npm run dist:mac
 
-    # - name: Build distributable
-    #   run: npx electron-builder --publish always
-    #   env:
-    #     GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Build distributable
+      run: |
+        npm run publish
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GH_TOKEN: ${{ secrets.GH_TOKEN }}
